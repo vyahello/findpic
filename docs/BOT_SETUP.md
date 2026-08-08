@@ -1,10 +1,19 @@
 # Setting up the findpic bot
 
-Three things need doing by hand. Everything else — name, descriptions, command
-menu, in both languages — is set by the bot itself on every start, so it lives in
-git rather than in @BotFather's memory.
+@BotFather is needed for exactly one thing: creating the bot. The name, both
+descriptions, the command menu and the avatar are published by a single command
+from the message catalogue, so the bot's public identity lives in git — in two
+languages, reviewable in a diff — rather than in a chat window nobody can audit.
 
 **Total time: about five minutes.**
+
+| Step | Where |
+|---|---|
+| 1. Create the bot | @BotFather, once |
+| 2. Publish its identity | `python -m findpic.bot --setup` |
+| 3. Log the token out of the cloud API | one `curl`, mandatory here |
+| 4. Add `BOT_TOKEN` to GitHub | repository secrets |
+| 5. Deploy | Actions → Deploy |
 
 ---
 
