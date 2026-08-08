@@ -16,3 +16,6 @@ samples/
 # IDE
 .idea/
 .vscode/
+
+# pyenv-virtualenv name, specific to one machine.
+.python-version
