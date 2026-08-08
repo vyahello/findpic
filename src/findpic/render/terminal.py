@@ -305,7 +305,7 @@ def render_image(console: Console, report: Report) -> None:
             f"ISO {capture.iso}" if capture.iso else None,
             f"f/{capture.f_number:g}" if capture.f_number else None,
             f"{capture.exposure_time} s" if capture.exposure_time else None,
-            capture.focal_length,
+            t.get("detail.mm", value=capture.focal_length) if capture.focal_length else None,
         )
         if part
     )

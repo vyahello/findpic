@@ -257,12 +257,16 @@ def extract_capture(meta: Metadata) -> CaptureInfo:
     capture.modified_matches_taken = same_moment(modified, taken)
     capture.digitised_differs = same_moment(digitized, taken) is False
 
+    # Stored as bare numbers: "mm" is English, and the CLI and the bot attach
+    # their own translated unit.
     focal = meta.float("ExifIFD:FocalLength")
     if focal:
-        capture.focal_length = f"{focal:g} mm"
+        capture.focal_mm = focal
+        capture.focal_length = f"{focal:g}"
     focal35 = meta.float("ExifIFD:FocalLengthIn35mmFormat")
     if focal35:
-        capture.focal_length_35mm = f"{focal35:g} mm"
+        capture.focal_35mm = focal35
+        capture.focal_length_35mm = f"{focal35:g}"
 
     if offset:
         capture.timezone_source = "OffsetTimeOriginal tag"

@@ -177,7 +177,13 @@ def identity_tags(context: Context) -> Iterable[Finding]:
         category=Category.PRIVACY,
         severity=Severity.WARNING,
         confidence=Confidence.HIGH,
-        params={"tag_pairs": [(key, truncate(value, 40)) for _, key, value in found[:3]]},
+        params={
+            "tag_pairs": [(key, truncate(value, 40)) for _, key, value in found[:3]],
+            # Deduplicated bare values. The tag each name was found in belongs in
+            # the detail view; a one-line "what leaves with this file" wants the
+            # names alone, and the same name often sits in two tags.
+            "values": ", ".join(dict.fromkeys(truncate(value, 40) for _, _, value in found)),
+        },
         evidence={tag: value for tag, _, value in found},
         weight=20,
         remediation=(

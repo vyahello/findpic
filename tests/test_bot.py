@@ -257,8 +257,8 @@ def test_report_renders_in_the_requested_language(gps_jpeg: Path) -> None:
     ukrainian = render_report(
         analyze(gps_jpeg, options=AnalysisOptions(geocode=False, language="uk"))
     )
-    assert "Privacy" in english
-    assert "Приватність" in ukrainian
+    assert "WHAT THIS GIVES AWAY" in english
+    assert "ЩО ЦЕ ВИДАЄ ПРО ВАС" in ukrainian
 
 
 @pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")

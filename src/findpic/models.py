@@ -276,6 +276,9 @@ class CaptureInfo:
     exposure_time: str | None = None
     focal_length: str | None = None
     focal_length_35mm: str | None = None
+    #: The same values as numbers, so a renderer can attach a translated unit.
+    focal_mm: float | None = None
+    focal_35mm: float | None = None
     flash: str | None = None
     exposure_program: str | None = None
     metering_mode: str | None = None
