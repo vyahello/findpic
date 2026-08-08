@@ -1,0 +1,95 @@
+# findpic bot, deployed alongside an existing local Telegram Bot API server.
+#
+# Two containers by design:
+#
+#   bot      — unprivileged, read-only, parses files that arrive from strangers
+#   janitor  — root, does nothing but delete this bot's processed uploads
+#
+# The split exists because the shared Bot API volume grants uid 1000 read access
+# but not write. Running the bot itself as root to gain a delete would put root
+# on the process that parses hostile input, which is exactly the wrong trade.
+
+name: findpic
+
+services:
+  bot:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: findpic-bot:latest
+    container_name: findpic-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Talk to the local Bot API server rather than api.telegram.org: it lifts
+      # the 20 MB download ceiling to 2 GB and hands back a filesystem path
+      # instead of a URL, so originals are read with no download step.
+      BOT_API_BASE: http://remy-bot-api:8081
+      BOT_API_IS_LOCAL: "1"
+      BOT_API_FILES_ROOT: /var/lib/telegram-bot-api
+      DATABASE_PATH: /data/findpic-bot.sqlite3
+      WORK_DIR: /tmp/findpic
+      # The janitor owns deletion; this process has no write access there.
+      DELETE_SOURCE_FILES: "0"
+    volumes:
+      - findpic-data:/data
+      - /var/lib/telegram-bot-api:/var/lib/telegram-bot-api:ro
+    networks:
+      - remy
+    tmpfs:
+      # Analysis scratch lives in RAM and never survives a restart.
+      - /tmp:size=512m,mode=1777
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import findpic.bot.runner"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  janitor:
+    image: alpine:3.20
+    container_name: findpic-janitor
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - /var/lib/telegram-bot-api:/files
+    # Scoped to this bot's own token directory and nothing else — the volume is
+    # shared with other bots whose files are none of our business.
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        test -n "$${BOT_TOKEN}" || { echo "BOT_TOKEN is required"; exit 1; }
+        target="/files/$${BOT_TOKEN}"
+        echo "janitor watching $${target}"
+        while true; do
+          if [ -d "$${target}" ]; then
+            find "$${target}" -type f -mmin +5 -delete 2>/dev/null || true
+            find "$${target}" -type d -empty -mindepth 1 -delete 2>/dev/null || true
+          fi
+          sleep 60
+        done
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options: { max-size: "1m", max-file: "1" }
+
+volumes:
+  findpic-data:
+
+networks:
+  remy:
+    # Created by the remy compose project; findpic joins it to reach the Bot API
+    # server by name rather than exposing another port on the host.
+    name: remy_default
+    external: true

@@ -19,3 +19,6 @@ samples/
 
 # pyenv-virtualenv name, specific to one machine.
 .python-version
+
+# Bot secrets, written by the deploy workflow. Never committed.
+deploy/.env
