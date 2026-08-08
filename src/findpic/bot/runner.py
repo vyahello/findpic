@@ -19,7 +19,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats
 
 from ..exif import ExifTool, ExifToolMissing
-from ..i18n import Translator, available_languages
+from ..i18n import FALLBACK_LANGUAGE, Translator, available_languages
 from .config import Config, ConfigError
 from .handlers import router
 from .middlewares import AccessMiddleware, LanguageMiddleware, ThrottleMiddleware
@@ -48,22 +48,60 @@ def build_session(config: Config) -> AiohttpSession | None:
     )
 
 
-async def set_bot_commands(bot: Bot) -> None:
-    """Publish the command menu in every language the bot speaks."""
+async def configure_profile(bot: Bot) -> None:
+    """Publish the bot's public profile, in every language it speaks.
+
+    Name, descriptions and command menu are set through the API on every start
+    rather than typed into @BotFather once. That keeps them in version control,
+    reviewable in a diff, and identical across languages — and it means a
+    redeploy is all it takes to correct a typo a user reported.
+
+    None of it is load-bearing: a failure here is logged and the bot carries on.
+    """
     for code in available_languages():
         translator = Translator(code)
+        # English is the fallback profile, so it goes in with no language_code.
+        language = None if code == FALLBACK_LANGUAGE else code
+
         commands = [
             BotCommand(command=name, description=translator.get(f"bot.command.{name}"))
             for name in MENU_COMMANDS
         ]
-        try:
-            await bot.set_my_commands(
-                commands,
-                scope=BotCommandScopeAllPrivateChats(),
-                language_code=None if code == "en" else code,
-            )
-        except Exception as error:  # noqa: BLE001 - never block startup on this
-            logger.warning("could not set commands for %s: %s", code, error)
+        calls = (
+            (
+                "commands",
+                bot.set_my_commands(
+                    commands,
+                    scope=BotCommandScopeAllPrivateChats(),
+                    language_code=language,
+                ),
+            ),
+            (
+                "name",
+                bot.set_my_name(name=translator.get("bot.profile.name"), language_code=language),
+            ),
+            (
+                "short description",
+                bot.set_my_short_description(
+                    short_description=translator.get("bot.profile.short"),
+                    language_code=language,
+                ),
+            ),
+            (
+                "description",
+                bot.set_my_description(
+                    description=translator.get("bot.profile.description"),
+                    language_code=language,
+                ),
+            ),
+        )
+        for what, call in calls:
+            try:
+                await call
+            except Exception as error:  # noqa: BLE001 - never block startup
+                # Telegram rate-limits name changes hard; a rejection here is
+                # usually "you already set this recently", not a real problem.
+                logger.warning("could not set %s for %s: %s", what, code, error)
 
 
 async def cleanup_loop(storage: Storage, config: Config) -> None:
@@ -124,7 +162,7 @@ async def run(config: Config) -> None:
 
     dispatcher.include_router(router)
 
-    await set_bot_commands(bot)
+    await configure_profile(bot)
     cleaner = asyncio.create_task(cleanup_loop(storage, config))
 
     try:

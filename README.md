@@ -165,6 +165,30 @@ $ findpic ~/Pictures/*.jpg --summary
 originality, privacy, structure  →  + good   ~ fair   ! poor   x bad   ? unknown
 ```
 
+## Telegram bot
+
+The same analysis, as a bot — in English and Ukrainian, switchable per user.
+
+<img src="docs/bot-icon.png" alt="findpic bot" width="88" align="left" hspace="16" vspace="4">
+
+Send a photo and get the three verdicts, the device, the time, the place and the
+leaks — then a button that hands back a **clean copy** with the identifying
+metadata removed and orientation and colour preserved.
+
+The bot leads with the one thing that decides whether any of it works: send the
+picture **as a file**, not as a photo. Telegram re-compresses photos and strips
+every tag before the bot ever sees them.
+
+<br clear="left">
+
+Setup takes about five minutes — see **[docs/BOT_SETUP.md](docs/BOT_SETUP.md)**.
+Name, descriptions and command menu are set by the bot itself from the message
+catalogue, so they live in git rather than in @BotFather.
+
+Deployment is a container carrying its own pinned exiftool, deployed to a VPS by
+GitHub Actions after CI goes green. It runs unprivileged and read-only, because
+it parses files that arrive from strangers.
+
 ## Three verdicts, deliberately separate
 
 Most tools collapse everything into one score. That destroys the information you actually want, because the axes are independent:
