@@ -159,7 +159,7 @@ $ findpic ~/Pictures/*.jpg --summary
 ```
 !x+  demo.jpg                   Apple iPhone 15 Pro  2024-07-14 19:42  Avenue Gustave Eiffel, Pa
 !~+  IMG_4417.JPG               Apple iPhone 15 Pro  2024-07-14 19:42  no location
-+x!  poly.jpg                   Apple iPhone X       2021-02-27 22:23  Lviv, Ukraine
++x!  poly.jpg                   Apple iPhone X       2021-02-27 22:23  Museumplein, Amsterdam
 ?++  naked.jpg                  Unknown device       no timestamp      no location
 ^^^
 originality, privacy, structure  →  + good   ~ fair   ! poor   x bad   ? unknown

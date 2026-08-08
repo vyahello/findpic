@@ -33,7 +33,7 @@ DEFAULT_LANGUAGE = "en"
 
 #: Address components grouped by tier, most specific first within each tier.
 #: We take at most one component per tier, which keeps the one-line place useful
-#: ("Futura Hub, Lviv, Lviv Oblast, Ukraine") instead of letting a house number
+#: ("Louvre, Paris, Ile-de-France, France") instead of letting a house number
 #: and a street crowd out the city.
 _PLACE_TIERS = (
     ("amenity", "building", "tourism", "shop", "leisure", "road", "neighbourhood"),
