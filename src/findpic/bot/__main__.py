@@ -1,4 +1,4 @@
-"""``python -m findpic.bot``."""
+"""``python -m findpic.bot`` — run the bot, or ``--setup`` its profile."""
 
 from __future__ import annotations
 

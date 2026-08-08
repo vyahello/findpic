@@ -29,16 +29,8 @@ BotFather replies with a token that looks like `8123456789:AAF…`.
 > Do not paste it into a chat, a commit, or an issue. If it leaks, `/revoke` in
 > BotFather and the old one dies immediately.
 
-### Set the avatar
-
-Still in BotFather:
-
-```
-/setuserpic
-```
-
-Pick your bot, then upload **[`docs/bot-icon.png`](bot-icon.png)** from this repo
-(512×512, already sized for Telegram).
+That is the only thing BotFather is needed for. The name, both descriptions, the
+command menu **and the avatar** are all published by the setup command in step 2.
 
 ### Optional but recommended
 
@@ -52,7 +44,49 @@ meant to be used, but it is the safer default.
 
 ---
 
-## 2. Log the token out of the cloud API
+## 2. Publish the bot's identity
+
+One command sets the name, the short description, the description, the command
+menu and the avatar — in English and Ukrainian — from the message catalogue.
+
+Preview it first; this needs no token and contacts nobody:
+
+```bash
+python -m findpic.bot --setup --dry-run
+```
+
+Happy with it? Apply it:
+
+```bash
+BOT_TOKEN='<your token>' python -m findpic.bot --setup
+```
+
+```
+connected as @your_bot (id=8123456789)
+
+  [ok]   English      name
+  [ok]   English      short description
+  [ok]   English      description
+  [ok]   English      command menu
+  [ok]   Українська   name
+  [ok]   Українська   short description
+  [ok]   Українська   description
+  [ok]   Українська   command menu
+
+  [ok]   avatar        docs/bot-icon.png
+```
+
+Run it whenever you change the texts — it is idempotent. Telegram rate-limits
+**name** changes hard, so a `[fail] name` shortly after a previous change means
+"wait a while", not that something is broken.
+
+To edit the wording: `src/findpic/locales/en.json` and `uk.json`, keys
+`bot.profile.*` and `bot.command.*`. The test suite fails if a text exceeds
+Telegram's limits, so an over-long description cannot reach the API.
+
+---
+
+## 3. Log the token out of the cloud API
 
 **This step is mandatory and easy to miss.** This deployment uses your own local
 Bot API server (`remy-bot-api`), and Telegram will not deliver updates to a
@@ -81,7 +115,7 @@ To move the bot back to the cloud API later: stop the container, call
 
 ---
 
-## 3. Add the token to GitHub
+## 4. Add the token to GitHub
 
 Repository → **Settings → Secrets and variables → Actions → New repository secret**:
 
@@ -114,7 +148,7 @@ Under the **Variables** tab (not secrets — these are not sensitive):
 
 ---
 
-## 4. Deploy
+## 5. Deploy
 
 Push anything to `main`, or trigger it by hand:
 
@@ -140,7 +174,7 @@ docker compose restart bot
 
 ## What the bot publishes about itself
 
-Set automatically at every start, in English and Ukrainian, from
+Set by `--setup`, and re-applied on every start, in English and Ukrainian, from
 `src/findpic/locales/*.json`:
 
 - **Name** — `bot.profile.name`
@@ -179,4 +213,4 @@ alive: `docker compose ps janitor`. It only ever touches this bot's own token
 directory, never another bot's.
 
 **Deploy fails with `BOT_TOKEN secret is not set`.**
-Step 3.
+Step 4.

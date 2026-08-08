@@ -7,6 +7,7 @@ import time.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import sys
@@ -181,12 +182,38 @@ async def run(config: Config) -> None:
         logger.info("findpic bot stopped")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="findpic-bot",
+        description="Run the findpic Telegram bot, or publish its public profile.",
+    )
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="publish the name, descriptions, command menu and avatar, then exit",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --setup, print the profile without contacting Telegram",
+    )
+    args = parser.parse_args(argv)
+
     try:
         config = Config.from_env()
     except ConfigError as error:
+        if args.setup and args.dry_run:
+            # Reviewing the texts should not require a token.
+            from .setup import run_setup
+
+            return run_setup(None, dry_run=True)
         print(f"configuration error: {error}", file=sys.stderr)
         return 2
+
+    if args.setup:
+        from .setup import run_setup
+
+        return run_setup(config, dry_run=args.dry_run)
 
     try:
         asyncio.run(run(config))

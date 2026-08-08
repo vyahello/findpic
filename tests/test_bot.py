@@ -251,3 +251,52 @@ def test_language_keyboard_marks_the_active_choice() -> None:
     labels = [button.text for row in markup.inline_keyboard for button in row]
     assert any("✓" in label and "Укра" in label for label in labels)
     assert sum("✓" in label for label in labels) == 1
+
+
+# ------------------------------------------------------------ profile setup
+
+
+def test_profile_texts_fit_telegrams_limits() -> None:
+    """Telegram rejects an over-long name or description with a bare 400."""
+    from findpic.bot.setup import check_limits
+
+    assert check_limits() == []
+
+
+def test_profile_is_defined_in_every_language() -> None:
+    from findpic.bot.setup import profile_for
+    from findpic.i18n import available_languages
+
+    for language in available_languages():
+        profile = profile_for(language)
+        for field, text in profile.items():
+            assert text and not text.startswith("bot.profile"), (
+                f"{language}/{field} is untranslated"
+            )
+
+
+def test_english_and_ukrainian_profiles_differ() -> None:
+    """A copy-paste slip would leave one language showing the other's text."""
+    from findpic.bot.setup import profile_for
+
+    english, ukrainian = profile_for("en"), profile_for("uk")
+    assert english["short"] != ukrainian["short"]
+    assert english["description"] != ukrainian["description"]
+
+
+def test_the_avatar_ships_with_the_repository() -> None:
+    from findpic.bot.setup import find_icon
+
+    icon = find_icon()
+    assert icon is not None and icon.is_file()
+    assert icon.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_preview_needs_no_token_and_no_network() -> None:
+    from findpic.bot.setup import render_preview
+
+    preview = render_preview()
+    assert "NAME" in preview and "COMMAND MENU" in preview
+    assert "findpic" in preview
+    # Both languages must be represented.
+    assert "English" in preview and "Українська" in preview

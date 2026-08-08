@@ -62,6 +62,8 @@ COPY src/findpic/__init__.py ./src/findpic/__init__.py
 RUN pip install --no-cache-dir ".[bot]" && pip uninstall -y findpic
 
 COPY src ./src
+# The avatar, so `--setup` works from inside the container as well.
+COPY docs/bot-icon.png ./docs/bot-icon.png
 RUN pip install --no-cache-dir --no-deps -e .
 
 # Runs as the same UID the host grants read access to the shared Bot API volume,
