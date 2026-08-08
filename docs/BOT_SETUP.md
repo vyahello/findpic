@@ -215,6 +215,34 @@ not a real failure.
 
 ---
 
+## Rotating the token
+
+If the token ever leaks — pasted into a chat, committed, screenshotted — it must
+be replaced. Anyone holding it controls the bot and can read every photo sent to
+it.
+
+Rotation is four ordered steps, and three of them fail *silently* if done
+against the wrong token. `scripts/rotate-token.sh` does them together so they
+cannot drift apart:
+
+```bash
+# 1. @BotFather -> /revoke -> select your bot -> copy the NEW token
+# 2. then:
+./scripts/rotate-token.sh --deploy
+```
+
+It prompts for the token without echoing it, refuses one that matches what is
+already in `deploy/.env` (which means you skipped the revoke), updates the file,
+sets the GitHub secret, logs the **new** token out of the cloud API, and triggers
+a deploy.
+
+> The `logOut` is per-token, not per-bot. A new token starts out logged in to the
+> cloud API, so it needs its own — otherwise the bot starts, reports
+> `connected as`, and never receives a message.
+
+Expect the running bot to stop working between the revoke and the redeploy: the
+old token is dead the moment BotFather issues a new one.
+
 ## Troubleshooting
 
 **The bot never answers.**
