@@ -272,11 +272,18 @@ def test_findings_sort_worst_first(gps_jpeg: Path) -> None:
 
 @pytest.mark.samples
 def test_real_samples_analyse_cleanly(real_samples: list[Path]) -> None:
+    """Every real photo must analyse without a rule crashing.
+
+    No assertion is made about *what* they contain: a stripped file that came
+    back through a messenger is a perfectly valid thing to find in someone's
+    collection, and the tool's job is to report that honestly.
+    """
     for path in real_samples:
         report = run(path)
         assert not [f for f in report.findings if f.id.startswith("internal.")]
         assert report.verdicts["structure"].level is VerdictLevel.GOOD
-        assert report.device.make
+        assert report.file.sha256
+        assert report.tag_count > 0
 
 
 @pytest.mark.samples
