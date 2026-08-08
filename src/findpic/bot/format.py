@@ -138,13 +138,17 @@ def render_device(report: Report) -> list[str]:
 
 
 def _format_date(moment: dt.datetime, translator: Translator) -> str:
-    """A date a person reads, not an ISO string."""
+    """A date a person reads, to the second.
+
+    Seconds matter here: two photos a few seconds apart is exactly the kind of
+    detail someone checks a timestamp for.
+    """
     return translator.get(
         "time.full",
         day=moment.day,
         month=translator.get(f"time.month.{moment.month}"),
         year=moment.year,
-        time=moment.strftime("%H:%M"),
+        time=moment.strftime("%H:%M:%S"),
     )
 
 
@@ -157,10 +161,12 @@ def render_when(report: Report) -> list[str]:
     lines: list[str] = []
     if moment is not None:
         lines.append(f"<b>{esc(_format_date(moment, t))}</b>")
-        detail = [t.describe_when(moment)]
-        if capture.taken_offset:
-            detail.append(f"UTC{capture.taken_offset}")
-        lines.append(esc(" · ".join(part for part in detail if part)))
+        # The UTC offset is deliberately not shown. It is local time — which is
+        # what the reader expects — and "UTC+02:00" means nothing to most people
+        # while looking like it should. It stays in the full tag dump.
+        when = t.describe_when(moment)
+        if when:
+            lines.append(esc(when))
     else:
         lines.append(f"<b>{esc(capture.taken)}</b>")
 
