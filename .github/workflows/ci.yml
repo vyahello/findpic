@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install exiftool and ImageMagick
+        # exiftool is the tool under test; ImageMagick builds the fixture images
+        # so no binaries need to live in the repository.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libimage-exiftool-perl imagemagick
+          exiftool -ver
+          magick -version | head -1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Test
+        # `samples` covers the maintainer's own photos, which are gitignored and
+        # never present in CI.
+        run: pytest -m "not samples" -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install ruff
+
+      - name: Ruff check
+        run: ruff check src tests
+
+      - name: Ruff format check
+        run: ruff format --check src tests
+
+  catalogues:
+    name: translation catalogues
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate every locale is complete and parses
+        # Cheap and dependency-free, so a missing translation fails fast rather
+        # than waiting on the full matrix.
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+
+          locales = sorted(pathlib.Path("src/findpic/locales").glob("*.json"))
+          catalogs = {p.stem: json.loads(p.read_text(encoding="utf-8")) for p in locales}
+          english = set(catalogs["en"])
+          failed = False
+
+          for name, catalog in catalogs.items():
+              if name == "en":
+                  continue
+              missing = sorted(english - set(catalog))
+              orphan = sorted(set(catalog) - english)
+              if missing:
+                  print(f"::error::{name}.json is missing {len(missing)} keys: {missing[:10]}")
+                  failed = True
+              if orphan:
+                  print(f"::error::{name}.json has {len(orphan)} unknown keys: {orphan[:10]}")
+                  failed = True
+
+          print(f"{len(catalogs)} catalogues, {len(english)} keys each")
+          sys.exit(1 if failed else 0)
+          PY
