@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Personal photographs stay local. Analysing your own pictures is the point of
+# this tool; committing them is not.
+samples/
+
+# IDE
+.idea/
+.vscode/

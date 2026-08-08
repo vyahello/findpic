@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "findpic"
+version = "0.1.0"
+description = "Read a photo's metadata and explain, in plain English, what device made it, when and where, whether it is an untouched original, and what it leaks about you."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "vyahello", email = "vyahello@gmail.com" }]
+keywords = ["exif", "exiftool", "metadata", "osint", "forensics", "privacy", "photo"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Multimedia :: Graphics",
+]
+dependencies = ["rich>=13.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov>=4.0"]
+
+[project.scripts]
+findpic = "findpic.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/vyahello/findpic"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+findpic = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "samples: tests that require the user's real photos in samples/",
+    "network: tests that make outbound network calls",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+    "E501",    # line length is handled by the formatter
+    "SIM108",  # ternaries are not always clearer than an if/else
+    "B008",    # argparse and dataclass defaults legitimately call functions
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Rule packs are imported purely for their registration side effect.
+"src/findpic/analysis/__init__.py" = ["F401", "E402"]
+# Tests deliberately use non-ASCII filenames and long literal fixtures.
+"tests/*" = ["E741", "RUF001"]
+
+[tool.ruff.format]
+docstring-code-format = true
