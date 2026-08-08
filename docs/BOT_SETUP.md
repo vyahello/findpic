@@ -64,7 +64,24 @@ Preview it first; this needs no token and contacts nobody:
 python -m findpic.bot --setup --dry-run
 ```
 
-Happy with it? Apply it:
+Happy with it? Put the token somewhere the command can read it:
+
+```bash
+cp deploy/.env.example deploy/.env
+$EDITOR deploy/.env          # set BOT_TOKEN=…
+```
+
+`deploy/.env` is gitignored and is read automatically. **Do not put the token in
+`deploy/.env.example`** — that one is tracked in git and would publish it.
+
+Then:
+
+```bash
+python -m findpic.bot --setup
+```
+
+Or skip the file entirely for a one-off — a real environment variable always
+wins over `.env`:
 
 ```bash
 BOT_TOKEN='<your token>' python -m findpic.bot --setup

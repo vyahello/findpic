@@ -32,13 +32,59 @@ TOKEN = "1234567890:AAHc0000000000000000000000000000000"
 def test_config_requires_a_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BOT_TOKEN", raising=False)
     with pytest.raises(ConfigError, match="BOT_TOKEN"):
-        Config.from_env()
+        Config.from_env(use_env_file=False)
+
+
+def test_env_file_is_loaded_when_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`deploy/.env` is what people expect to edit, so it has to be read."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"# a comment\n\nexport BOT_TOKEN='{TOKEN}'\nBOT_DEFAULT_LANGUAGE=\"uk\"\nDAILY_QUOTA=7\n"
+    )
+    monkeypatch.delenv("BOT_TOKEN", raising=False)
+    monkeypatch.delenv("BOT_DEFAULT_LANGUAGE", raising=False)
+    monkeypatch.delenv("DAILY_QUOTA", raising=False)
+    monkeypatch.setenv("FINDPIC_ENV_FILE", str(env_file))
+
+    config = Config.from_env()
+    assert config.token == TOKEN
+    assert config.language == "uk"
+    assert config.daily_quota == 7
+
+
+def test_real_environment_beats_the_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit `BOT_TOKEN=… python -m findpic.bot` must win over a stale file."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("BOT_TOKEN=111:FROM_FILE\n")
+    monkeypatch.setenv("FINDPIC_ENV_FILE", str(env_file))
+    monkeypatch.setenv("BOT_TOKEN", "222:FROM_ENVIRONMENT")
+
+    assert Config.from_env().token == "222:FROM_ENVIRONMENT"
+
+
+def test_missing_env_file_is_not_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from findpic.bot.config import load_env_file
+
+    monkeypatch.setenv("FINDPIC_ENV_FILE", "/nonexistent/.env")
+    assert load_env_file() is None
+
+
+def test_the_tracked_template_carries_no_token() -> None:
+    """deploy/.env.example is committed; a real token there would be published."""
+    template = Path(__file__).resolve().parent.parent / "deploy" / ".env.example"
+    for line in template.read_text().splitlines():
+        if line.startswith("BOT_TOKEN="):
+            assert line.strip() == "BOT_TOKEN=", (
+                "a real token has been written into the tracked .env.example"
+            )
 
 
 def test_config_rejects_a_malformed_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BOT_TOKEN", "not-a-token")
     with pytest.raises(ConfigError, match="does not look like"):
-        Config.from_env()
+        Config.from_env(use_env_file=False)
 
 
 def test_cloud_api_is_capped_at_twenty_megabytes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -46,7 +92,7 @@ def test_cloud_api_is_capped_at_twenty_megabytes(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("BOT_TOKEN", TOKEN)
     monkeypatch.delenv("BOT_API_BASE", raising=False)
     monkeypatch.setenv("MAX_FILE_MB", "500")
-    config = Config.from_env()
+    config = Config.from_env(use_env_file=False)
     assert config.max_file_bytes == CLOUD_DOWNLOAD_LIMIT
     assert not config.api_is_local
 
@@ -55,7 +101,7 @@ def test_local_api_lifts_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BOT_TOKEN", TOKEN)
     monkeypatch.setenv("BOT_API_BASE", "http://remy-bot-api:8081")
     monkeypatch.setenv("MAX_FILE_MB", "500")
-    config = Config.from_env()
+    config = Config.from_env(use_env_file=False)
     assert config.api_is_local
     assert config.max_file_bytes == 500 * 1024 * 1024
 
@@ -63,7 +109,7 @@ def test_local_api_lifts_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_allowlist_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BOT_TOKEN", TOKEN)
     monkeypatch.setenv("ALLOWED_USER_IDS", "111, 222;333 , junk,")
-    config = Config.from_env()
+    config = Config.from_env(use_env_file=False)
     assert config.allowed_user_ids == frozenset({111, 222, 333})
     assert not config.is_public
 
@@ -71,19 +117,19 @@ def test_allowlist_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_empty_allowlist_means_public(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BOT_TOKEN", TOKEN)
     monkeypatch.delenv("ALLOWED_USER_IDS", raising=False)
-    assert Config.from_env().is_public
+    assert Config.from_env(use_env_file=False).is_public
 
 
 def test_describe_never_prints_the_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BOT_TOKEN", TOKEN)
-    description = Config.from_env().describe()
+    description = Config.from_env(use_env_file=False).describe()
     assert TOKEN not in description
     assert "AAHc" not in description
 
 
 def test_token_directory_is_scoped_to_this_bot(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BOT_TOKEN", TOKEN)
-    config = Config.from_env()
+    config = Config.from_env(use_env_file=False)
     assert config.token_directory == config.api_files_root / TOKEN
 
 

@@ -45,6 +45,58 @@ class ConfigError(RuntimeError):
     """The bot cannot start with the configuration it was given."""
 
 
+#: Where a local run looks for its settings, in order. Under Docker the variables
+#: are already in the environment (compose reads `deploy/.env` itself), so none of
+#: these exist in the container and the search costs nothing.
+ENV_FILE_CANDIDATES = (
+    Path("deploy/.env"),
+    Path(".env"),
+    Path(__file__).resolve().parents[3] / "deploy" / ".env",
+)
+
+
+def find_env_file() -> Path | None:
+    """The .env to load, or None. ``FINDPIC_ENV_FILE`` overrides the search."""
+    override = os.environ.get("FINDPIC_ENV_FILE")
+    if override:
+        path = Path(override).expanduser()
+        return path if path.is_file() else None
+    return next((path for path in ENV_FILE_CANDIDATES if path.is_file()), None)
+
+
+def load_env_file(path: Path | None = None) -> Path | None:
+    """Load ``KEY=value`` pairs into the environment, if a file is there.
+
+    Real environment variables always win, so `BOT_TOKEN=… python -m findpic.bot`
+    still overrides whatever the file says — which is what anyone would expect,
+    and what keeps a stale file from silently shadowing a deliberate override.
+
+    Returns the file that was loaded, or None.
+    """
+    path = path or find_env_file()
+    if path is None:
+        return None
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        line = line.removeprefix("export ").lstrip()
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not key:
+            continue
+        # Strip one layer of matching quotes, the way a shell would.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+    return path
+
+
 @dataclass(frozen=True)
 class Config:
     """Everything the bot needs to run."""
@@ -90,12 +142,20 @@ class Config:
         return self.api_files_root / self.token
 
     @classmethod
-    def from_env(cls) -> Config:
+    def from_env(cls, use_env_file: bool = True) -> Config:
+        loaded = load_env_file() if use_env_file else None
+
         token = os.environ.get("BOT_TOKEN", "").strip()
         if not token:
+            where = f"{loaded} has no BOT_TOKEN" if loaded else "no .env file was found"
             raise ConfigError(
-                "BOT_TOKEN is not set. Create a bot with @BotFather and put the "
-                "token in the environment (see deploy/.env.example)."
+                "BOT_TOKEN is not set.\n"
+                f"  Looked in the environment and for a .env file: {where}.\n"
+                "  Fix it with either:\n"
+                "    cp deploy/.env.example deploy/.env   # then put the token in deploy/.env\n"
+                "    BOT_TOKEN='123:ABC' python -m findpic.bot --setup\n"
+                "  Note deploy/.env.example is a tracked template — never put a real "
+                "token in it."
             )
         if ":" not in token:
             raise ConfigError("BOT_TOKEN does not look like a Telegram bot token.")
