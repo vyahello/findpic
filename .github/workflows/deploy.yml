@@ -1,0 +1,169 @@
+name: Deploy
+
+# Deploys only after CI has gone green on main, so a red build can never reach
+# the VPS. `workflow_dispatch` is there for redeploying the current commit
+# without pushing an empty change.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy to VPS
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    environment: production
+
+    steps:
+      - name: Resolve the commit CI actually tested
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          HOST_KEY: ${{ secrets.VPS_SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "${HOST_KEY:-}" ]; then
+            # Pinned host key: immune to a DNS or routing hijack.
+            printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          else
+            echo "::warning::VPS_SSH_HOST_KEY is not set; trusting the key on first use"
+            ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_APP_DIR: ${{ secrets.VPS_APP_DIR }}
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          ALLOWED_USER_IDS: ${{ secrets.ALLOWED_USER_IDS }}
+          ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
+          BOT_DEFAULT_LANGUAGE: ${{ vars.BOT_DEFAULT_LANGUAGE || 'en' }}
+          DAILY_QUOTA: ${{ vars.DAILY_QUOTA || '50' }}
+          THROTTLE_SECONDS: ${{ vars.THROTTLE_SECONDS || '3' }}
+          MAX_FILE_MB: ${{ vars.MAX_FILE_MB || '64' }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BOT_TOKEN:-}" ]; then
+            echo "::error::BOT_TOKEN secret is not set. Create the bot with @BotFather and add the token as a repository secret."
+            exit 1
+          fi
+
+          # The whole .env is built here, base64'd, and sent over the SSH channel
+          # on stdin. Passing it as `ssh host VAR=secret ...` would place the
+          # token in the remote command line, where any user on the box could
+          # read it out of the process list.
+          env_b64="$(
+            {
+              printf 'BOT_TOKEN=%s\n'             "$BOT_TOKEN"
+              printf 'ALLOWED_USER_IDS=%s\n'      "$ALLOWED_USER_IDS"
+              printf 'ADMIN_USER_IDS=%s\n'        "$ADMIN_USER_IDS"
+              printf 'BOT_DEFAULT_LANGUAGE=%s\n'  "$BOT_DEFAULT_LANGUAGE"
+              printf 'DAILY_QUOTA=%s\n'           "$DAILY_QUOTA"
+              printf 'THROTTLE_SECONDS=%s\n'      "$THROTTLE_SECONDS"
+              printf 'MAX_FILE_MB=%s\n'           "$MAX_FILE_MB"
+              printf 'LOG_LEVEL=%s\n'             "$LOG_LEVEL"
+              printf 'DROP_PENDING_UPDATES=1\n'
+            } | base64 -w0
+          )"
+
+          {
+            # %q quotes for the remote shell, so no value can break out.
+            printf 'APP_DIR=%q\n'       "$VPS_APP_DIR"
+            printf 'TARGET_SHA=%q\n'    "$TARGET_SHA"
+            printf 'DEPLOY_ENV=%q\n'    "$env_b64"
+            cat <<'REMOTE'
+          echo "==> deploying ${TARGET_SHA} to ${APP_DIR}"
+
+          if [ ! -d "${APP_DIR}/.git" ]; then
+            mkdir -p "$(dirname "${APP_DIR}")"
+            git clone --quiet https://github.com/vyahello/findpic.git "${APP_DIR}"
+          fi
+          cd "${APP_DIR}"
+
+          git fetch --quiet --all --prune
+          # Deploy the exact commit CI tested, not whatever main points at now.
+          git reset --quiet --hard "${TARGET_SHA}"
+          git clean -qfd -e deploy/.env
+          echo "==> at $(git rev-parse --short HEAD): $(git log -1 --pretty=%s)"
+
+          umask 077
+          printf '%s' "${DEPLOY_ENV}" | base64 -d > deploy/.env
+          chmod 600 deploy/.env
+
+          cd deploy
+          docker compose build --pull bot
+          docker compose up -d --remove-orphans
+          docker image prune -f >/dev/null 2>&1 || true
+          REMOTE
+          } | ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
+                  "${VPS_USER}@${VPS_HOST}" 'bash -euo pipefail -s'
+
+      - name: Verify the bot came up
+        env:
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_APP_DIR: ${{ secrets.VPS_APP_DIR }}
+        run: |
+          set -euo pipefail
+          {
+            printf 'APP_DIR=%q\n' "$VPS_APP_DIR"
+            cat <<'REMOTE'
+          cd "${APP_DIR}/deploy"
+
+          # Give polling a moment to establish before judging the result.
+          sleep 12
+          docker compose ps
+
+          state=$(docker inspect findpic-bot --format '{{.State.Status}}')
+          restarts=$(docker inspect findpic-bot --format '{{.RestartCount}}')
+          echo "==> state=${state} restarts=${restarts}"
+
+          echo "==> recent log"
+          docker compose logs --no-color --tail 40 bot | sed -E 's/[0-9]{8,}:[A-Za-z0-9_-]{30,}/<token>/g'
+
+          if [ "${state}" != "running" ]; then
+            echo "::error::findpic-bot is ${state}, not running"
+            exit 1
+          fi
+          # "connected as @name" is only logged once getMe succeeds, which is the
+          # real proof the token and the API endpoint are both good.
+          if ! docker compose logs --no-color --tail 200 bot | grep -q "connected as @"; then
+            echo "::error::the bot never reported a successful connection"
+            exit 1
+          fi
+          echo "==> deploy verified"
+          REMOTE
+          } | ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+                  "${VPS_USER}@${VPS_HOST}" 'bash -euo pipefail -s'
+
+      - name: Remove the deploy key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
