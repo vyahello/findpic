@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 150" width="560" height="150" role="img" aria-label="findpic — photo metadata in plain English">
+  <defs>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#5eead4"/>
+      <stop offset="55%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+    <linearGradient id="sweep" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.30"/>
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Aperture blades: the lens the tool reads a fingerprint from. -->
+  <g transform="translate(75 75)">
+    <circle r="46" fill="url(#sweep)"/>
+    <circle r="46" fill="none" stroke="url(#ring)" stroke-width="5"/>
+    <g stroke="url(#ring)" stroke-width="3.4" stroke-linecap="round" opacity="0.95">
+      <path d="M0 -46 L23 -6"/>
+      <path d="M39.8 -23 L16.8 17"/>
+      <path d="M39.8 23 L-6.2 23"/>
+      <path d="M0 46 L-23 6"/>
+      <path d="M-39.8 23 L-16.8 -17"/>
+      <path d="M-39.8 -23 L6.2 -23"/>
+    </g>
+    <!-- Scan line: the metadata being read out of it. -->
+    <path d="M-46 0 L46 0" stroke="#f8fafc" stroke-width="2" opacity="0.55"/>
+    <circle r="6" fill="#f8fafc" opacity="0.9"/>
+  </g>
+
+  <text x="150" y="70" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="46" font-weight="700" fill="#e2e8f0" letter-spacing="-1">findpic</text>
+  <text x="152" y="99" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif"
+        font-size="16.5" fill="#94a3b8">photo metadata, in plain English</text>
+  <text x="152" y="122" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif"
+        font-size="14" fill="#64748b">what took it · when · where · is it original · what it leaks</text>
+</svg>
