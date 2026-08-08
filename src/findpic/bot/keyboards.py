@@ -9,7 +9,12 @@ exactly that reason — a Telegram ``file_id`` alone would overflow the budget.
 from __future__ import annotations
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..i18n import LANGUAGE_NAMES, Translator, available_languages
@@ -58,6 +63,47 @@ def report_keyboard(
     )
     builder.adjust(1)
     return builder.as_markup()
+
+
+def main_keyboard(translator: Translator) -> ReplyKeyboardMarkup:
+    """The persistent keyboard under the message box.
+
+    Slash commands are discoverable only if you already know they exist, and
+    typing them on a phone is tedious. These buttons send ordinary text, which a
+    filter maps back to the same handlers — so both routes stay supported and
+    anyone who prefers /help keeps it.
+    """
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text=translator.get("bot.menu.help")),
+                KeyboardButton(text=translator.get("bot.menu.language")),
+            ],
+            [
+                KeyboardButton(text=translator.get("bot.menu.privacy")),
+                KeyboardButton(text=translator.get("bot.menu.about")),
+            ],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder=translator.get("bot.menu.placeholder"),
+    )
+
+
+def menu_labels() -> dict[str, str]:
+    """Every button caption in every language, mapped to what it does.
+
+    Built across all languages, not just the reader's: someone can switch
+    language while an old keyboard is still on screen, and the stale buttons
+    should keep working rather than being echoed back as unrecognised text.
+    """
+    actions = ("help", "language", "privacy", "about")
+    labels: dict[str, str] = {}
+    for code in available_languages():
+        translator = Translator(code)
+        for action in actions:
+            labels[translator.get(f"bot.menu.{action}")] = action
+    return labels
 
 
 def help_keyboard(translator: Translator) -> InlineKeyboardMarkup:

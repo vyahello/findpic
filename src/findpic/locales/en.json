@@ -439,5 +439,11 @@
   "ui.unit.metres": "{value} m",
   "bot.profile.name": "findpic · photo metadata",
   "bot.profile.short": "Send a photo. Learn what device took it, when and where, and what it gives away about you.",
-  "bot.profile.description": "I read a photo's metadata and explain it in plain English:\n\n📱 what device took it, and on which OS\n🕓 when — down to the timezone\n📍 where — with a map link\n🔍 whether it is an untouched original\n⚠️ what it gives away about you\n\nSend the picture AS A FILE, not as a photo — Telegram strips the metadata from compressed photos before I ever see them.\n\nOpen source: github.com/vyahello/findpic"
+  "bot.profile.description": "I read a photo's metadata and explain it in plain English:\n\n📱 what device took it, and on which OS\n🕓 when — down to the timezone\n📍 where — with a map link\n🔍 whether it is an untouched original\n⚠️ what it gives away about you\n\nSend the picture AS A FILE, not as a photo — Telegram strips the metadata from compressed photos before I ever see them.\n\nOpen source: github.com/vyahello/findpic",
+  "bot.menu.help": "📖 How to use",
+  "bot.menu.language": "🌐 Language",
+  "bot.menu.privacy": "🔒 Privacy",
+  "bot.menu.about": "ℹ️ About",
+  "bot.menu.placeholder": "Send a photo as a file…",
+  "bot.menu.switched": "Language switched. The buttons below are updated."
 }

@@ -20,7 +20,7 @@ from pathlib import Path
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatAction
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import BaseFilter, Command, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from ..exif import ExifTool, ExifToolError
@@ -33,6 +33,8 @@ from .keyboards import (
     LanguageCallback,
     help_keyboard,
     language_keyboard,
+    main_keyboard,
+    menu_labels,
     report_keyboard,
 )
 from .service import AnalysisService
@@ -41,6 +43,10 @@ from .storage import Storage
 logger = logging.getLogger(__name__)
 
 router = Router(name="findpic")
+#: Analysing a file costs CPU and disk; tapping a button costs nothing. Keeping
+#: them on separate routers is what lets the throttle apply to one and not the
+#: other — otherwise every menu tap would burn a user's rate limit.
+media_router = Router(name="findpic-media")
 
 #: MIME types we will attempt. exiftool reads far more than this, but a bot that
 #: accepts .exe "for analysis" is a service nobody should run.
@@ -80,33 +86,31 @@ IMAGE_SUFFIXES = {
 async def handle_start(message: Message, t: Translator, config: Config) -> None:
     await message.answer(
         t.get("bot.start", name=esc(message.from_user.first_name if message.from_user else "")),
-        reply_markup=help_keyboard(t),
+        # The persistent keyboard arrives with the welcome, so the very first
+        # thing a new user sees is buttons rather than a list of slash commands.
+        reply_markup=main_keyboard(t),
         disable_web_page_preview=True,
     )
 
 
-@router.message(Command("help"))
-async def handle_help(message: Message, t: Translator) -> None:
+async def show_help(message: Message, t: Translator) -> None:
     await message.answer(
         t.get("bot.help"), reply_markup=help_keyboard(t), disable_web_page_preview=True
     )
 
 
-@router.message(Command("lang", "language", "mova"))
-async def handle_language_command(message: Message, t: Translator, language: str) -> None:
+async def show_language(message: Message, t: Translator, language: str) -> None:
     await message.answer(t.get("bot.language.prompt"), reply_markup=language_keyboard(language))
 
 
-@router.message(Command("privacy"))
-async def handle_privacy(message: Message, t: Translator, config: Config) -> None:
+async def show_privacy(message: Message, t: Translator, config: Config) -> None:
     await message.answer(
         t.get("bot.privacy", ttl_hours=config.analysis_ttl_seconds // 3600),
         disable_web_page_preview=True,
     )
 
 
-@router.message(Command("about"))
-async def handle_about(message: Message, t: Translator) -> None:
+async def show_about(message: Message, t: Translator) -> None:
     from .. import __version__
 
     exiftool_version = "?"
@@ -117,6 +121,57 @@ async def handle_about(message: Message, t: Translator) -> None:
         reply_markup=help_keyboard(t),
         disable_web_page_preview=True,
     )
+
+
+@router.message(Command("help"))
+async def handle_help(message: Message, t: Translator) -> None:
+    await show_help(message, t)
+
+
+@router.message(Command("lang", "language", "mova"))
+async def handle_language_command(message: Message, t: Translator, language: str) -> None:
+    await show_language(message, t, language)
+
+
+@router.message(Command("privacy"))
+async def handle_privacy(message: Message, t: Translator, config: Config) -> None:
+    await show_privacy(message, t, config)
+
+
+@router.message(Command("about"))
+async def handle_about(message: Message, t: Translator) -> None:
+    await show_about(message, t)
+
+
+class MenuButton(BaseFilter):
+    """Matches a tap on the persistent keyboard.
+
+    Reply-keyboard buttons send their caption as plain text, so the caption has
+    to be mapped back to an action. Every language's captions are accepted, not
+    just the reader's: switching language leaves the old keyboard on screen until
+    Telegram replaces it, and those stale buttons should still work.
+    """
+
+    def __init__(self) -> None:
+        self.labels = menu_labels()
+
+    async def __call__(self, message: Message) -> dict[str, str] | bool:
+        action = self.labels.get((message.text or "").strip())
+        return {"menu_action": action} if action else False
+
+
+@router.message(MenuButton())
+async def handle_menu_button(
+    message: Message, menu_action: str, t: Translator, language: str, config: Config
+) -> None:
+    if menu_action == "help":
+        await show_help(message, t)
+    elif menu_action == "language":
+        await show_language(message, t, language)
+    elif menu_action == "privacy":
+        await show_privacy(message, t, config)
+    elif menu_action == "about":
+        await show_about(message, t)
 
 
 # ------------------------------------------------------------------ language
@@ -145,6 +200,9 @@ async def handle_language_choice(
     await storage.set_language(query.from_user.id, code)
     chosen = Translator(code)
     await query.answer(chosen.get("bot.language.changed", language=chosen.language_name()))
+    # The persistent keyboard is captioned in the old language until it is
+    # replaced, so send a fresh one immediately.
+    await query.message.answer(chosen.get("bot.menu.switched"), reply_markup=main_keyboard(chosen))
     try:
         await query.message.edit_text(
             chosen.get("bot.language.prompt"), reply_markup=language_keyboard(code)
@@ -162,7 +220,7 @@ def _looks_like_image(file_name: str | None, mime: str | None) -> bool:
     return bool(file_name and Path(file_name).suffix.lower() in IMAGE_SUFFIXES)
 
 
-@router.message(F.photo)
+@media_router.message(F.photo)
 async def handle_compressed_photo(
     message: Message,
     bot: Bot,
@@ -188,7 +246,7 @@ async def handle_compressed_photo(
     )
 
 
-@router.message(F.document)
+@media_router.message(F.document)
 async def handle_document(
     message: Message,
     bot: Bot,
@@ -217,14 +275,15 @@ async def handle_document(
     )
 
 
-@router.message(F.video | F.animation | F.video_note | F.audio | F.voice)
+@media_router.message(F.video | F.animation | F.video_note | F.audio | F.voice)
 async def handle_other_media(message: Message, t: Translator) -> None:
     await message.answer(t.get("bot.error.send_as_file"))
 
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message, t: Translator) -> None:
-    await message.answer(t.get("bot.error.send_a_photo"), reply_markup=help_keyboard(t))
+    # Someone typing at the bot has not found the buttons, so send them.
+    await message.answer(t.get("bot.error.send_a_photo"), reply_markup=main_keyboard(t))
 
 
 async def _analyse_and_reply(

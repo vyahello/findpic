@@ -346,3 +346,74 @@ def test_preview_needs_no_token_and_no_network() -> None:
     assert "findpic" in preview
     # Both languages must be represented.
     assert "English" in preview and "Українська" in preview
+
+
+# --------------------------------------------------------------- menu buttons
+
+
+def test_menu_labels_cover_every_language() -> None:
+    """A stale keyboard from before a language switch must still work."""
+    from findpic.bot.keyboards import menu_labels
+    from findpic.i18n import available_languages
+
+    labels = menu_labels()
+    actions = {"help", "language", "privacy", "about"}
+    assert set(labels.values()) == actions
+    # Every language contributes a caption for every action.
+    assert len(labels) == len(actions) * len(available_languages())
+
+
+def test_menu_captions_are_unique_across_languages() -> None:
+    """Two languages sharing a caption would make the action ambiguous."""
+    from findpic.bot.keyboards import menu_labels
+    from findpic.i18n import Translator, available_languages
+
+    seen: dict[str, str] = {}
+    for code in available_languages():
+        t = Translator(code)
+        for action in ("help", "language", "privacy", "about"):
+            caption = t.get(f"bot.menu.{action}")
+            assert caption not in seen or seen[caption] == action, (
+                f"{caption!r} means {seen.get(caption)} in one language and {action} in {code}"
+            )
+            seen[caption] = action
+    assert len(menu_labels()) == len(seen)
+
+
+def test_main_keyboard_is_persistent_and_sized() -> None:
+    from findpic.bot.keyboards import main_keyboard
+    from findpic.i18n import Translator
+
+    markup = main_keyboard(Translator("uk"))
+    assert markup.is_persistent and markup.resize_keyboard
+    rows = markup.keyboard
+    assert len(rows) == 2 and all(len(row) == 2 for row in rows)
+    # Captions sit in a phone-width button; long ones wrap and look broken.
+    for row in rows:
+        for button in row:
+            assert len(button.text) <= 22, button.text
+
+
+async def test_menu_filter_maps_captions_to_actions() -> None:
+    from findpic.bot.handlers import MenuButton
+
+    filt = MenuButton()
+
+    class FakeMessage:
+        def __init__(self, text):
+            self.text = text
+
+    assert await filt(FakeMessage("📖 Як користуватися")) == {"menu_action": "help"}
+    assert await filt(FakeMessage("🌐 Language")) == {"menu_action": "language"}
+    # Whitespace happens when a caption is copied rather than tapped.
+    assert await filt(FakeMessage("  ℹ️ About  ")) == {"menu_action": "about"}
+    assert await filt(FakeMessage("just some text")) is False
+    assert await filt(FakeMessage(None)) is False
+
+
+def test_media_and_command_routers_are_separate() -> None:
+    """Only the media router is throttled; button taps must stay free."""
+    from findpic.bot.handlers import media_router, router
+
+    assert media_router is not router
+    assert media_router.name == "findpic-media"

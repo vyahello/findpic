@@ -22,7 +22,7 @@ from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats
 from ..exif import ExifTool, ExifToolMissing
 from ..i18n import FALLBACK_LANGUAGE, Translator, available_languages
 from .config import Config, ConfigError
-from .handlers import router
+from .handlers import media_router, router
 from .middlewares import AccessMiddleware, LanguageMiddleware, ThrottleMiddleware
 from .service import AnalysisService
 from .storage import Storage
@@ -158,9 +158,10 @@ async def run(config: Config) -> None:
     dispatcher.callback_query.middleware(language)
     dispatcher.message.middleware(access)
     dispatcher.callback_query.middleware(access)
-    # Only the media handlers are metered; commands and buttons stay free.
-    router.message.middleware.register(ThrottleMiddleware(storage, config))
+    # Only the media router is metered, so commands and button taps stay free.
+    media_router.message.middleware.register(ThrottleMiddleware(storage, config))
 
+    dispatcher.include_router(media_router)
     dispatcher.include_router(router)
 
     await configure_profile(bot)
