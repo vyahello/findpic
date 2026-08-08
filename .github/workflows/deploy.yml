@@ -69,6 +69,10 @@ jobs:
           THROTTLE_SECONDS: ${{ vars.THROTTLE_SECONDS || '3' }}
           MAX_FILE_MB: ${{ vars.MAX_FILE_MB || '64' }}
           LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+          # The container must run as the host user the Bot API volume's ACL
+          # grants read access to. Resolved on the VPS rather than hardcoded.
+          APP_UID: ${{ vars.APP_UID || '' }}
+          APP_GID: ${{ vars.APP_GID || '' }}
         run: |
           set -euo pipefail
           if [ -z "${BOT_TOKEN:-}" ]; then
@@ -90,6 +94,8 @@ jobs:
               printf 'THROTTLE_SECONDS=%s\n'      "$THROTTLE_SECONDS"
               printf 'MAX_FILE_MB=%s\n'           "$MAX_FILE_MB"
               printf 'LOG_LEVEL=%s\n'             "$LOG_LEVEL"
+              printf 'APP_UID=%s\n'               "$APP_UID"
+              printf 'APP_GID=%s\n'               "$APP_GID"
               printf 'DROP_PENDING_UPDATES=1\n'
             } | base64 -w0
           )"
@@ -116,10 +122,28 @@ jobs:
 
           umask 077
           printf '%s' "${DEPLOY_ENV}" | base64 -d > deploy/.env
+
+          # The container has to run as whichever UID the Bot API volume's ACL
+          # grants read access to, and that is this deploy account. Resolving it
+          # here beats hardcoding a number that is right on exactly one machine.
+          uid="$(id -u)"; gid="$(id -g)"
+          sed -i "s/^APP_UID=.*/APP_UID=${uid}/; s/^APP_GID=.*/APP_GID=${gid}/" deploy/.env
+          grep -q '^APP_UID=' deploy/.env || printf 'APP_UID=%s\nAPP_GID=%s\n' "$uid" "$gid" >> deploy/.env
+          echo "==> container will run as uid=${uid} gid=${gid}"
           chmod 600 deploy/.env
 
           cd deploy
           docker compose build --pull bot
+
+          # Docker only sets a named volume's ownership when it first creates it,
+          # so a change of APP_UID would leave the database unwritable. A
+          # throwaway root container fixes it; idempotent, and a no-op when the
+          # ownership already matches.
+          if docker volume inspect findpic_findpic-data >/dev/null 2>&1; then
+            docker run --rm -v findpic_findpic-data:/data alpine:3.20 \
+              chown -R "${uid}:${gid}" /data >/dev/null 2>&1 || true
+          fi
+
           docker compose up -d --remove-orphans
           docker image prune -f >/dev/null 2>&1 || true
           REMOTE

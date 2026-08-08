@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -71,12 +72,25 @@ class AnalysisService:
         server_path: Path | None = None
         if self.config.api_is_local:
             candidate = Path(file.file_path)
-            if candidate.is_absolute() and candidate.exists():
-                # Copy rather than analyse in place: exiftool must never be
-                # pointed at a directory another service is still writing to.
-                await asyncio.to_thread(shutil.copyfile, candidate, target)
-                server_path = candidate
-                return target, server_path
+            if candidate.is_absolute():
+                try:
+                    # Copy rather than analyse in place: exiftool must never be
+                    # pointed at a directory another service is still writing to.
+                    await asyncio.to_thread(shutil.copyfile, candidate, target)
+                    return target, candidate
+                except FileNotFoundError:
+                    logger.warning("local API reported a path we cannot see: %s", candidate)
+                except PermissionError:
+                    # Almost always a UID mismatch against the volume's ACL. Say
+                    # so once, loudly, instead of failing every photo in silence.
+                    logger.error(
+                        "cannot read %s — the container runs as uid %s, which the "
+                        "shared volume's ACL does not grant access to. Set APP_UID "
+                        "in deploy/.env to the host user that does, and rebuild.",
+                        candidate,
+                        os.getuid(),
+                    )
+                    raise
 
         # Cloud API, or a local path we could not see — download over HTTP.
         await bot.download_file(file.file_path, destination=target)

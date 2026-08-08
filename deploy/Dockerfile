@@ -66,13 +66,18 @@ COPY src ./src
 COPY docs/bot-icon.png ./docs/bot-icon.png
 RUN pip install --no-cache-dir --no-deps -e .
 
-# Runs as the same UID the host grants read access to the shared Bot API volume,
-# so the bot never needs root to read an upload. Deleting them is the janitor's
-# job precisely so this process can stay unprivileged while it parses files that
-# arrived from strangers.
-RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin findpic \
+# The UID must match the host account whose ACL entry grants read access to the
+# shared Bot API volume, because that ACL is keyed by *numeric* UID — a container
+# user with a different number is denied outright, and the volume's `other::---`
+# leaves no fallback. Getting it wrong yields a PermissionError per photo and no
+# other symptom, so it is an explicit build argument rather than a guess.
+ARG APP_UID=1000
+ARG APP_GID=1000
+RUN groupadd --gid "${APP_GID}" findpic \
+ && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home \
+      --shell /usr/sbin/nologin findpic \
  && mkdir -p /data /tmp/findpic \
- && chown -R findpic:findpic /data /tmp/findpic /app
+ && chown -R "${APP_UID}:${APP_GID}" /data /tmp/findpic /app
 
 USER findpic
 

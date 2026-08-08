@@ -188,12 +188,17 @@ class Config:
         )
 
     def describe(self) -> str:
-        """A startup line that never prints the token."""
+        """A startup line that never prints the token.
+
+        The UID is in here because access to a self-hosted Bot API server's files
+        is granted by an ACL keyed on it, and a mismatch is otherwise invisible
+        until the first photo fails.
+        """
         endpoint = self.api_base or "api.telegram.org"
         mode = "local" if self.api_is_local else "cloud"
         access = "public" if self.is_public else f"{len(self.allowed_user_ids)} allowed users"
         return (
-            f"endpoint={endpoint} ({mode}) · access={access} · "
+            f"uid={os.getuid()} · endpoint={endpoint} ({mode}) · access={access} · "
             f"max_file={self.max_file_bytes // 1024 // 1024}MB · "
             f"quota={self.daily_quota}/day · throttle={self.throttle_seconds}s"
         )

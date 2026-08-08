@@ -16,6 +16,11 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+      args:
+        # Must equal the UID of the host account the Bot API volume's ACL grants
+        # read access to — `id -u cax` on this box. See APP_UID in .env.
+        APP_UID: ${APP_UID:-1000}
+        APP_GID: ${APP_GID:-1000}
     image: findpic-bot:latest
     container_name: findpic-bot
     restart: unless-stopped
