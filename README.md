@@ -287,6 +287,61 @@ Deployment is a container carrying its own pinned exiftool, deployed to a VPS by
 GitHub Actions after CI goes green. It runs unprivileged and read-only, because
 it parses files that arrive from strangers.
 
+## When the metadata is gone
+
+A photo that came back from a messenger has had its Exif rebuilt from nothing. No camera, no timestamp, no coordinates — every question findpic normally answers is answered by tags that are not there.
+
+**They cannot be recovered from the file.** findpic checks rather than assumes: it walks the Exif block and marks every byte reachable from the directory graph, and on a properly stripped file the unreferenced remainder is two bytes of zero padding. The GPS pointer is not present-and-zeroed, it is absent from the directory. There is no slack space to carve.
+
+What survives is the compression, because the compression is the picture. The quantization tables, the restart interval and the segment order are chosen by whoever wrote the file and cannot be removed without encoding it again. So findpic reads those instead, and draws the distinction the reader actually cares about:
+
+```
+ FINDINGS
+ Originality
+  - The file was repackaged, but the picture was not compressed again
+    The compression tables belong to the device that took the photo, while the wrapper
+    around them — a JFIF header, the tables split across several segments and placed
+    after the frame — belongs to a general-purpose library. So the compressed picture
+    was copied through untouched and only the container was rebuilt. That is what
+    removing metadata looks like from the inside. Your image has lost no quality; it has
+    lost its tags.
+
+  - The embedded preview was carried through untouched
+    The preview and the picture disagree about how a JPEG should be laid out — the
+    preview keeps the device's arrangement, the picture around it has the rewriter's. So
+    whatever rebuilt this file copied the preview across as an opaque block without
+    looking inside it.
+```
+
+Two facts come out of the tables with no signature database at all. Whether they **are** the library's — libjpeg and everything built on it scale the two example tables from Annex K of the JPEG standard, so an exact match names the quality outright, and a near miss is reported as no match rather than as "about 92". And whether the first two rows of the luma table repeat, which no scaling of Annex K can produce, so a table where they do was not written by a library.
+
+Where a timestamp genuinely does survive, findpic says so and hands you the command:
+
+```
+  - The capture time survives in the filename: 2023:08:13 14:54:35
+    ...that came from the same clock as the deleted tag. This is the one piece of what
+    was removed that you can genuinely put back.
+    fix: exiftool -AllDates="2023:08:13 14:54:35" -o restored.jpg "IMG_20230813_145435.jpg"
+```
+
+`IMG-20230813-WA0002.jpg` gets a date and an explicit "the hour is not known" — the trailing digits are a counter. `IMG_2781.JPG` gets nothing at all, because Apple has never put a date in a filename and a confident guess there would be pure invention.
+
+### Back it up before you need it
+
+Metadata is restorable only if a copy exists. `--backup` writes a sidecar in exiftool's own MIE format:
+
+```bash
+findpic photo.jpg --backup                    # writes photo.jpg.mie beside it
+findpic stripped.jpg --restore photo.jpg.mie  # writes stripped.restored.jpg
+findpic stripped.jpg --restore original.jpg   # any donor that still has its tags
+```
+
+Measured on a real iPhone photo: 20 KB of sidecar restores **165 tags of 166**, every value byte-identical, binary MakerNotes included. The one casualty is Apple's `AROT` HDR block, an APP10 segment exiftool can read and cannot write.
+
+Both operations write a new file and neither touches an input. An existing output is refused rather than overwritten — whoever is running this has already lost data once.
+
+> A plain tag dump is **not** a backup. Values are formatted for reading, binary tags are described rather than included, and exiftool reads the result as a list of filenames. findpic's Telegram bot says so on the dump itself and offers the sidecar beside it.
+
 ## Three verdicts, deliberately separate
 
 Most tools collapse everything into one score. That destroys the information you actually want, because the axes are independent:
@@ -424,13 +479,16 @@ src/findpic/
   geocode.py       Nominatim reverse geocoding, cached and rate-limited
   i18n.py          catalogue loading, plural rules, translated units
   interpret.py     raw measurements  →  sentences (bearing, speed, light, distance)
+  jpegprint.py     compression structure  →  which encoder wrote this
+  recover.py       capture times that outlived the tags (filenames)
+  restore.py       metadata backup and restore (the only code that writes)
   locales/         en.json, uk.json
   models.py        Report, Finding, Verdict — the only thing renderers see
   tables.py        editors, AI generators, filename patterns, encoder digests
   analysis/
     extract.py     raw tags  →  structured fields
     registry.py    the @rule decorator
-    rules_*.py     authenticity, privacy, structure, ai, platform
+    rules_*.py     authenticity, privacy, structure, ai, platform, recovery
     verdict.py     the three-axis scoring model
   render/
     terminal.py    the rich report
