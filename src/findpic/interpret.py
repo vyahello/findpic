@@ -38,7 +38,9 @@ def describe_accuracy(metres: float | None) -> Note | None:
     """
     if metres is None:
         return None
-    value = f"{metres:.0f}" if metres >= 10 else f"{metres:.1f}"
+    # A whole number of metres is written without a decimal: "±6 m", not "±6.0 m".
+    whole = metres >= 10 or float(metres).is_integer()
+    value = f"{metres:.0f}" if whole else f"{metres:.1f}"
     if metres <= 10:
         band = "exact"
     elif metres <= 50:
