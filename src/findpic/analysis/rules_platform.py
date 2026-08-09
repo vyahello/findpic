@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from ..models import Category, Confidence, Finding, Severity
+from ..recover import timestamp_from_filename
 from ..tables import match_filename
 from .context import Context
 from .registry import rule
@@ -32,6 +33,10 @@ def filename_origin(context: Context) -> Iterable[Finding]:
     """The filename as a hint about where the file has been."""
     matched = match_filename(context.file.name)
     if not matched:
+        return
+    if timestamp_from_filename(context.file.name) is not None:
+        # filename_timestamp names the same source and carries a date as well,
+        # so this would be the weaker half of the same sentence said twice.
         return
     yield Finding(
         id="platform.filename_hint",

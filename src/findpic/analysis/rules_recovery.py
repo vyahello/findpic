@@ -29,6 +29,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from ..models import Category, Confidence, Finding, Severity
+from ..recover import PRECISION_SECOND, timestamp_from_filename
 from .context import Context
 from .registry import rule
 
@@ -231,4 +232,40 @@ def preview_shape_differs(context: Context) -> Iterable[Finding]:
         },
         remediation="exiftool -b -ThumbnailImage photo.jpg > preview.jpg",
         weight=12,
+    )
+
+
+@rule("filename_timestamp", Category.PLATFORM, order=17)
+def filename_timestamp(context: Context) -> Iterable[Finding]:
+    """A capture time that outlived the tags, in the filename.
+
+    Only worth saying when the file has no capture time of its own — otherwise
+    the name is at best a confirmation of something already on screen, and at
+    worst a contradiction that belongs to a different rule.
+    """
+    if context.capture.taken:
+        return
+    found = timestamp_from_filename(context.file.name)
+    if found is None:
+        return
+
+    exact = found.precision == PRECISION_SECOND
+    yield Finding(
+        id="recovery.filename_time",
+        category=Category.PLATFORM,
+        severity=Severity.NOTICE,
+        confidence=Confidence.MEDIUM if exact else Confidence.LOW,
+        variant=found.precision,
+        detail_variant=found.precision,
+        params={
+            "moment": found.exif_value if exact else found.moment.strftime("%Y-%m-%d"),
+            "matched": found.matched,
+            "source_keys": [found.source],
+        },
+        evidence={"filename": context.file.name, "precision": found.precision},
+        # -o writes a new file. Restoring a date is a judgement call, and a
+        # judgement call should not overwrite the only copy of the evidence.
+        remediation=(
+            f'exiftool -AllDates="{found.exif_value}" -o restored.jpg "{context.file.name}"'
+        ),
     )
