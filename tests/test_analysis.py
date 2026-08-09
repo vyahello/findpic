@@ -295,3 +295,60 @@ def test_real_iphone_is_recognised_as_original(real_samples: list[Path]) -> None
         assert report.device.has_makernotes
         assert report.device.os.startswith("iOS")
         assert report.verdicts["originality"].level is VerdictLevel.GOOD
+
+
+# ------------------------------------------------- reading a stripped file
+
+
+def test_a_repackaged_file_is_not_reported_as_re_compressed(
+    tmp_path: Path, camera_jpeg: Path
+) -> None:
+    """The distinction the recovery rules exist to draw.
+
+    exiftool rewrites the metadata and copies the compressed data through, so
+    the picture is untouched. Calling that a re-encode would tell the reader
+    their photo had been degraded when it has not.
+    """
+    import subprocess
+
+    target = tmp_path / "repackaged.jpg"
+    target.write_bytes(camera_jpeg.read_bytes())
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-Make=", "-Model=", str(target)],
+        check=True,
+        capture_output=True,
+    )
+    ids = finding_ids(run(target))
+    assert "recovery.encoder_library" in ids or "recovery.encoder_vendor" in ids
+
+
+def test_a_screenshot_is_told_apart_from_a_stripped_photo(tmp_path: Path, blank_jpeg: Path) -> None:
+    """Absent because removed, or absent because it never existed.
+
+    Listing "no location" on a screenshot sends somebody looking for a
+    coordinate that has never existed anywhere.
+    """
+    import subprocess
+
+    target = tmp_path / "shot.jpg"
+    target.write_bytes(blank_jpeg.read_bytes())
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-UserComment=Screenshot", str(target)],
+        check=True,
+        capture_output=True,
+    )
+    assert "recovery.screenshot" in finding_ids(run(target))
+
+
+def test_an_ordinary_photo_is_not_called_a_screenshot(camera_jpeg: Path) -> None:
+    assert "recovery.screenshot" not in finding_ids(run(camera_jpeg))
+
+
+def test_a_camera_original_gets_no_recovery_findings(camera_jpeg: Path) -> None:
+    """These rules are for files with nothing left. A named camera has plenty.
+
+    Firing them on an intact photo would bury the findings that matter under
+    structural trivia the reader did not need.
+    """
+    ids = finding_ids(run(camera_jpeg))
+    assert not {i for i in ids if i.startswith("recovery.") and i != "recovery.filename_time"}

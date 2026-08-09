@@ -30,6 +30,7 @@ from collections.abc import Iterable
 
 from ..models import Category, Confidence, Finding, Severity
 from ..recover import PRECISION_SECOND, timestamp_from_filename
+from ..tables import match_filename
 from .context import Context
 from .registry import rule
 
@@ -170,19 +171,30 @@ def preview_survived_re_encode(context: Context) -> Iterable[Finding]:
     main, preview = context.jpeg, context.thumbnail
     if main is None or preview is None or not (main.ok and preview.ok):
         return
-    if not main.uses_library_tables:
-        return
     preview_luma = preview.luma
     if preview_luma is None or not preview_luma.repeats_first_row:
         return
 
+    # Two ways the preview can be older than the picture beside it: the picture
+    # was re-compressed by a library and the preview was not, or the picture's
+    # container was rebuilt and the preview was carried through as an opaque
+    # blob — which shows up as the two disagreeing about where the tables go.
+    re_encoded = main.uses_library_tables
+    repackaged = main.tables_before_frame != preview.tables_before_frame
+    if not (re_encoded or repackaged):
+        return
+
     yield Finding(
         id="recovery.preview_older",
+        variant="re_encoded" if re_encoded else "repackaged",
+        detail_variant="re_encoded" if re_encoded else "repackaged",
         category=Category.AUTHENTICITY,
         severity=Severity.NOTICE,
         confidence=Confidence.MEDIUM,
         params={"quality": main.ijg_quality or "?"},
         evidence={
+            "main_layout": main.layout,
+            "preview_layout": preview.layout,
             "main_tables": f"library, quality {main.ijg_quality}",
             "preview_tables": preview.table_signature,
             "preview_size": f"{preview.width}x{preview.height}",
@@ -268,4 +280,114 @@ def filename_timestamp(context: Context) -> Iterable[Finding]:
         remediation=(
             f'exiftool -AllDates="{found.exif_value}" -o restored.jpg "{context.file.name}"'
         ),
+    )
+
+
+@rule("restart_interval_convention", Category.AUTHENTICITY, order=18)
+def restart_interval_convention(context: Context) -> Iterable[Finding]:
+    """One restart marker per row of blocks — a device convention.
+
+    Restart markers let a decoder resynchronise after corruption, and a
+    general-purpose library omits them entirely unless asked. Some camera
+    pipelines emit exactly one per MCU row, which makes the interval a function
+    of the image width rather than a setting.
+
+    Cheap to check and it survives everything: the interval belongs to the
+    compressed data, so a container rewrite carries it through untouched. It is
+    corroboration for "a device compressed this", not a claim on its own, which
+    is why it only speaks when the tables have already said the same thing.
+    """
+    print_ = context.jpeg
+    if print_ is None or not print_.ok or context.has_camera_identity:
+        return
+    interval, width = print_.restart_interval, print_.width
+    luma = print_.luma
+    if not interval or not width or luma is None or not luma.repeats_first_row:
+        return
+    if not print_.sampling:
+        return
+
+    # One MCU is 8 pixels times the component's horizontal sampling factor.
+    mcu_width = 8 * print_.sampling[0][0]
+    expected = -(-width // mcu_width)  # ceiling division
+    if interval != expected:
+        return
+
+    yield Finding(
+        id="recovery.restart_per_row",
+        category=Category.AUTHENTICITY,
+        severity=Severity.INFO,
+        confidence=Confidence.MEDIUM,
+        params={"interval": interval},
+        evidence={"restart_interval": interval, "mcus_per_row": expected, "width": width},
+    )
+
+
+@rule("nonsense_resolution", Category.PLATFORM, order=19)
+def nonsense_resolution(context: Context) -> Iterable[Finding]:
+    """A file claiming to be one dot per inch.
+
+    XResolution and YResolution describe printing density, and every camera
+    writes 72. A value of 1 is not a resolution anybody chose; it is what comes
+    out when a writer copies a JFIF density field — where 1x1 means "no density,
+    treat these as an aspect ratio" — into an Exif tag whose unit is inches.
+
+    It has no consequence for the picture. It is worth reporting because it
+    pins down that a specific rewriter handled the file, which is the sort of
+    thing that lets two stripped photos be tied to the same source.
+    """
+    meta = context.meta
+    if context.has_camera_identity:
+        return
+    x = meta.float("IFD0:XResolution", "XResolution")
+    y = meta.float("IFD0:YResolution", "YResolution")
+    if x != 1 or y != 1:
+        return
+    unit = (meta.str("IFD0:ResolutionUnit", "ResolutionUnit") or "").lower()
+    if "inch" not in unit:
+        return
+
+    yield Finding(
+        id="recovery.one_dpi",
+        category=Category.PLATFORM,
+        severity=Severity.INFO,
+        confidence=Confidence.HIGH,
+        params={},
+        evidence={"XResolution": x, "YResolution": y, "ResolutionUnit": unit},
+    )
+
+
+#: How a file says it is a screen capture rather than a photograph.
+SCREENSHOT_MARKERS = ("screenshot", "screen shot", "screen capture", "знімок екрана")
+
+
+@rule("never_had_it", Category.PLATFORM, order=20)
+def never_had_it(context: Context) -> Iterable[Finding]:
+    """Absent because it was removed, or absent because it never existed.
+
+    A report that lists what is missing invites the reader to go looking for it.
+    On a screenshot that search cannot succeed: nothing was photographed, so
+    there was never a lens, a camera model or a location to record. Saying "no
+    location" without saying why sends somebody hunting for a coordinate that
+    has never existed anywhere.
+
+    The distinction is the whole point of the tool. "Removed" is a fact about
+    what somebody did to the file; "never existed" is a fact about what the file
+    is.
+    """
+    if context.has_camera_identity or context.location.present:
+        return
+    marker = (context.meta.str("ExifIFD:UserComment", "UserComment") or "").strip().lower()
+    from_tag = any(hint in marker for hint in SCREENSHOT_MARKERS)
+    from_name = (match_filename(context.file.name) or "").endswith("screenshot")
+    if not (from_tag or from_name):
+        return
+
+    yield Finding(
+        id="recovery.screenshot",
+        category=Category.PLATFORM,
+        severity=Severity.INFO,
+        confidence=Confidence.HIGH if from_tag else Confidence.MEDIUM,
+        params={},
+        evidence={"UserComment": marker or None, "filename": context.file.name},
     )
