@@ -171,15 +171,71 @@ The same analysis, as a bot — in English and Ukrainian, switchable per user.
 
 <img src="docs/bot-icon.png" alt="findpic bot" width="88" align="left" hspace="16" vspace="4">
 
-Send a photo and get the three verdicts, the device, the time, the place and the
-leaks — then a button that hands back a **clean copy** with the identifying
-metadata removed and orientation and colour preserved.
-
 The bot leads with the one thing that decides whether any of it works: send the
 picture **as a file**, not as a photo. Telegram re-compresses photos and strips
-every tag before the bot ever sees them.
+every tag before the bot ever sees them — and an empty report reads as a broken
+bot, so it says so up front rather than afterwards.
 
 <br clear="left">
+
+A chat message is not a terminal, so the report is shaped differently. The three
+verdicts stay in the CLI; the bot leads with **originality alone**, because "is
+this the picture that came out of the camera" is the one yes/no nothing else on
+screen answers. Everything else is said exactly once, and every number is turned
+into a claim — `GPSImgDirection 291` becomes a sentence about where the camera
+was pointing.
+
+```
+🔎 demo.jpg
+238.5 KB · JPEG · 4032×3024
+
+✂️ MODIFIED
+Edited, cropped or re-saved after capture.
+
+📱 DEVICE
+Apple iPhone 15 Pro · iOS 17.5.1
+24 mm equiv.
+
+🕓 WHEN
+14 July 2024, 19:42:08
+Sunday evening
+
+📍 WHERE
+Avenue Gustave Eiffel, Paris, Ile-de-France, France
+48.858370, 2.294481
+Accurate to ±6 m — to the building
+38 m above sea level
+The camera was pointing west-north-west (291°)
+You were standing still
+🗺 Open on the map
+
+📸 THE SHOT
+12.2 MP · 4032 × 3024 · 4:3
+ISO 64 · f/1.78 · 1/120 s · 6.765 mm
+Overcast or shade
+Flash did not fire
+
+⚠️ WHAT THIS GIVES AWAY
+• The exact coordinates of where it was taken
+• Identifiers shared by every photo from this device
+• Owner's name: Demo Owner
+```
+
+Under it sit the buttons that do something with the answer:
+
+| Button | What it does |
+|---|---|
+| 🧹 **Send me a clean copy** | The same picture back with the identifying metadata stripped, orientation and colour kept so it still displays correctly. Shown only when there is something worth removing. |
+| 🔍 **Show every raw tag** | Every tag exiftool found, as a text file — including the ones the report deliberately leaves out. |
+| 🌐 **Language** | English ⇄ Ukrainian, remembered per user. |
+
+A persistent keyboard under the message box carries 📖 **How to use**,
+🌐 **Language**, 🔒 **Privacy** and ℹ️ **About**. `/help`, `/lang`, `/privacy`
+and `/about` do the same thing — the buttons exist because slash commands are
+discoverable only if you already know they are there, and tedious to type on a
+phone. Captions from *every* language are accepted, so a keyboard left on screen
+from before a language switch keeps working instead of being echoed back as
+unrecognised text.
 
 Setup takes about five minutes — see **[docs/BOT_SETUP.md](docs/BOT_SETUP.md)**.
 Name, descriptions and command menu are set by the bot itself from the message
@@ -202,6 +258,8 @@ Most tools collapse everything into one score. That destroys the information you
 A holiday photo straight off your phone is a perfect original *and* a serious privacy leak. A scrubbed meme is a privacy non-event *and* completely unverifiable. One number cannot say that.
 
 **`UNKNOWN` is a real answer.** A file with no metadata gets `UNKNOWN` for originality — never "suspicious". Absence of evidence is reported as absence of evidence.
+
+All three are shown in the CLI, where a banner costs three lines of a tall terminal. The bot shows originality alone and folds privacy into **what this gives away** — on a phone, three coloured labels push the actual content below the fold to summarise information the message is about to show anyway.
 
 ## Install
 
@@ -314,6 +372,7 @@ src/findpic/
   container.py     JPEG/PNG structure walker (finds appended data)
   geocode.py       Nominatim reverse geocoding, cached and rate-limited
   i18n.py          catalogue loading, plural rules, translated units
+  interpret.py     raw measurements  →  sentences (bearing, speed, light, distance)
   locales/         en.json, uk.json
   models.py        Report, Finding, Verdict — the only thing renderers see
   tables.py        editors, AI generators, filename patterns, encoder digests
@@ -324,6 +383,12 @@ src/findpic/
     verdict.py     the three-axis scoring model
   render/
     terminal.py    the rich report
+  bot/
+    handlers.py    commands, buttons, media routing
+    format.py      the report as a Telegram message
+    keyboards.py   reply and inline keyboards, callback factories
+    service.py     download → analyse → delete
+    setup.py       publishes name, descriptions, menu and avatar
 ```
 
 ## Licence
