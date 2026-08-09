@@ -147,7 +147,13 @@ def render_device(console: Console, report: Report) -> None:
 
     lens = device.lens_model
     if lens and report.capture.focal_length_35mm:
-        lens = t.get("ui.value.lens_equivalent", lens=lens, focal=report.capture.focal_length_35mm)
+        # The focal length is stored unit-free so each renderer can attach its
+        # own translated "mm"; this is the CLI's half of that bargain.
+        lens = t.get(
+            "ui.value.lens_equivalent",
+            lens=lens,
+            focal=t.get("detail.mm", value=report.capture.focal_length_35mm),
+        )
     _add(table, t.get("ui.label.lens"), lens)
     _add(
         table,
@@ -304,7 +310,7 @@ def render_image(console: Console, report: Report) -> None:
         for part in (
             f"ISO {capture.iso}" if capture.iso else None,
             f"f/{capture.f_number:g}" if capture.f_number else None,
-            f"{capture.exposure_time} s" if capture.exposure_time else None,
+            t.get("detail.seconds", value=capture.exposure_time) if capture.exposure_time else None,
             t.get("detail.mm", value=capture.focal_length) if capture.focal_length else None,
         )
         if part

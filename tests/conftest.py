@@ -68,6 +68,8 @@ def camera_jpeg(fixture_dir: Path) -> Path:
         "-LensModel=TestLens 24mm f/2.8",
         "-FNumber=2.8",
         "-ExposureTime=1/250",
+        "-FocalLength=24",
+        "-FocalLengthIn35mmFormat=36",
         "-ISO=200",
         "-ExifImageWidth=640",
         "-ExifImageHeight=480",

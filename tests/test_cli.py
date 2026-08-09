@@ -147,3 +147,44 @@ def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--version"])
     assert excinfo.value.code == 0
     assert "findpic" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [("en", ("36 mm equivalent", "1/250 s")), ("uk", ("еквівалент 36 мм", "1/250 с"))],
+)
+def test_units_are_translated_not_baked_in(
+    camera_jpeg: Path,
+    capsys: pytest.CaptureFixture[str],
+    language: str,
+    expected: tuple[str, ...],
+) -> None:
+    """Every unit the CLI prints must come from the catalogue.
+
+    Focal lengths and shutter speeds are stored as bare numbers so each renderer
+    can attach its own translated unit. Twice now a renderer has forgotten its
+    half of that: the lens line lost its "mm" entirely, and the exposure line
+    kept a hard-coded English "s" in the Ukrainian report. Both were invisible
+    without reading the output side by side, which is what this does.
+    """
+    main([str(camera_jpeg), "--lang", language, *OFFLINE])
+    output = capsys.readouterr().out
+    for fragment in expected:
+        assert fragment in output
+
+
+def test_summary_legend_goes_to_stderr(
+    camera_jpeg: Path, gps_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The glyph key must reach a human without reaching a pipe.
+
+    --summary exists to be piped into grep and awk, so a legend on stdout would
+    corrupt the thing the mode is for. It was missing entirely for a while, which
+    left three unexplained glyph columns and a README documenting a key nobody
+    ever printed.
+    """
+    main([str(camera_jpeg), str(gps_jpeg), "--summary", *OFFLINE])
+    captured = capsys.readouterr()
+    assert "originality, privacy, structure" in captured.err
+    assert "originality, privacy, structure" not in captured.out
+    assert captured.out.count("\n") == 2
