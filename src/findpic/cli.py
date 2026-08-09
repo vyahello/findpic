@@ -241,6 +241,11 @@ def main(argv: list[str] | None = None) -> int:
             # One file, one line — always. A wrapped summary is unreadable and
             # breaks anything piping this into awk or grep.
             console.print(summary_line(report), no_wrap=True, crop=True)
+        if reports:
+            # Three glyph columns are unreadable without a key. The key belongs
+            # on stderr, though: on stdout it would land in whatever is grepping
+            # this, which is the reason --summary exists at all.
+            errors.print(Text(f"^^^  {translator.get('cli.legend')}", style="grey42"))
 
     if failures:
         return EXIT_ERROR
