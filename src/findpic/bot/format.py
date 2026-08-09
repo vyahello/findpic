@@ -331,23 +331,6 @@ def render_report(report: Report, *, source_note: str = "") -> str:
     return message
 
 
-def render_details(report: Report) -> str:
-    """Long-form explanations, for the button that asks for them."""
-    t = report.translator
-    blocks: list[str] = []
-    for finding in report.sorted_findings:
-        if finding.severity is Severity.INFO or finding.id in ALREADY_SHOWN:
-            continue
-        detail = finding.detail(t)
-        if not detail:
-            continue
-        block = f"<b>{esc(finding.title(t))}</b>\n{esc(detail)}"
-        if finding.remediation:
-            block += f"\n<code>{esc(finding.remediation)}</code>"
-        blocks.append(block)
-    return "\n\n".join(blocks)
-
-
 def render_tag_dump(report: Report) -> str:
     """Every raw tag, for the attachment the 'all tags' button sends."""
     lines = [
