@@ -18,16 +18,16 @@ Built on [`exiftool`](https://exiftool.org/). findpic does not replace it — it
 
 ## What it looks like
 
-Real output, unedited, from a demo photo carrying public landmark coordinates:
+Real output, unedited. The demo photo is built by **`python scripts/make-demo.py`** — synthetic pixels, Eiffel Tower coordinates, an owner called *Demo Owner*. A privacy tool should not demonstrate itself on somebody's home, and a sample nobody can regenerate is a sample nobody can check.
 
 ```console
 $ findpic demo.jpg
 ```
 ```
-╭──────────────────────────────────────────────────────────────────────────────────────╮
-│  findpic  ·  demo.jpg                                                                │
-│  JPEG · 217.4 KB · 92 metadata tags                                                  │
-╰──────────────────────────────────────────────────────────────────────────────────────╯
+╭────────────────────────────────────────────────────────────────────────────────────────╮
+│  findpic  ·  demo.jpg                                                                  │
+│  JPEG · 238.5 KB · 94 metadata tags                                                    │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
   !   Originality      MODIFIED              This file has been edited or re-saved since
                                              it was taken.
@@ -47,7 +47,8 @@ $ findpic demo.jpg
  Taken          2024-07-14 19:42:08 +02:00   (Sunday evening)
  Time zone      UTC+02:00  (from the camera's own offset tag)
  Modified       unchanged since capture
- GPS clock      2024-07-14 UTC
+ GPS clock      2024-07-14 17:42:08 UTC
+ File saved     2024-07-14 20:42:08 +03:00
 
  WHERE
  Coordinates    48.858370, 2.294481   ±6 m
@@ -62,6 +63,7 @@ $ findpic demo.jpg
  Dimensions     4032 × 3024   (12.2 MP)
  Exposure       ISO 64 · f/1.78 · 1/120 s · 6.765 mm
  Flash          Off, Did not fire
+ Colour         Uncalibrated
  Encoding       Baseline DCT, Huffman coding
 
  FINDINGS
@@ -72,8 +74,8 @@ $ findpic demo.jpg
     camera wrote them, but it does not say which program did it. Estimated quality
     setting: 92.
 
-  - Claims to be Apple iPhone 15 Pro but the vendor's private data block is gone
-    (medium confidence)
+  - Claims to be Apple iPhone 15 Pro but the vendor's private data block is gone  (medium
+    confidence)
     Cameras write a proprietary block full of internal settings. Almost nothing preserves
     it except the original file, so its absence means the file was re-saved — or the
     camera name was written in by hand.
@@ -85,7 +87,14 @@ $ findpic demo.jpg
     your workplace, or anywhere you go regularly, that is now known to every recipient.
     fix: exiftool -gps:all= -xmp:geotag= -o clean_copy.jpg photo.jpg
 
-  ! The file names a person: Artist: Demo Owner
+  ! 2 identifiers that tie this photo to one specific device
+    Values like Camera body serial number, Per-image unique ID are stable across photos.
+    Anyone holding two of your pictures can prove they came from the same camera, even if
+    nothing else matches.
+    fix: exiftool -serialnumber= -lensserialnumber= -imageuniqueid= -makernotes:all= -o
+    clean_copy.jpg photo.jpg
+
+  ! The file names a person: Artist: Demo Owner, Camera owner: Demo Owner
     These fields are usually filled in once, in a camera's setup menu or an editor's
     preferences, and then quietly attach to every photo afterwards.
     fix: exiftool -artist= -copyright= -ownername= -xmp:creator= -iptc:all= -o
@@ -96,9 +105,14 @@ $ findpic demo.jpg
     were — enough to work out which window, which floor, or which direction you were
     travelling.
 
+  i The time zone you were in is recorded (UTC+02:00)
+    Even with coordinates removed, the offset narrows you to a band of the world, and
+    across several photos it maps out your travel.
+    fix: exiftool -offsettime*= -o clean_copy.jpg photo.jpg
+
  FILE
- SHA-256        7d999770e004ee96f6c9cc5db292c7718a1bb3efd6313753f9470897f733f518
- MD5            61a65d7ac2e4831eb0721c5c85272131
+ SHA-256        e43e23e337a2194e8b0e217f9a497d3aa97b7ce0a4d41352ca56e59c97bcebda
+ MD5            6725f2967f4c8885ec8b91e27c838e76
  MIME           image/jpeg
 ```
 
@@ -112,40 +126,68 @@ Every finding is a sentence, not a tag dump — and every privacy finding ends w
 $ findpic demo.jpg --lang uk
 ```
 ```
-╭──────────────────────────────────────────────────────────────────────────────────────╮
-│  findpic  ·  demo.jpg                                                                │
-│  JPEG · 217.4 КБ · 92 теги метаданих                                                 │
-╰──────────────────────────────────────────────────────────────────────────────────────╯
+╭────────────────────────────────────────────────────────────────────────────────────────╮
+│  findpic  ·  demo.jpg                                                                  │
+│  JPEG · 238.5 КБ · 94 теги метаданих                                                   │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
   !   Оригінальність   ЗМІНЕНО               Цей файл редагували або перезберігали після
                                              зйомки.
-  x   Приватність      ВИСОКИЙ РИЗИК         Надіславши цей файл як є, ви передаєте своє
-                                             місцеперебування, пристрій або особу.
+  x   Приватність      СЕРЙОЗНИЙ ВИТІК       Надіславши цей файл як є, ви видаєте, де
+                                             були, чим знімали і хто ви.
   +   Структура        ЧИСТО                 Структура файлу саме така, як у звичайного
                                              зображення.
 
  ПРИСТРІЙ
  Камера         Apple iPhone 15 Pro
  Система        iOS 17.5.1
- Об'єктив       iPhone 15 Pro back triple camera 6.765mm f/1.78  (еквівалент 24 mm)
+ Об'єктив       iPhone 15 Pro back triple camera 6.765mm f/1.78  (еквівалент 24 мм)
+ Власник        Demo Owner
+ Серійний №     DEMO-SN-0001
 
  КОЛИ
  Знято          2024-07-14 19:42:08 +02:00   (неділя, вечір)
  Часовий пояс   UTC+02:00  (з власного тега камери)
- Змінено        не змінювався від моменту зйомки
+ Змінено        не змінювався після зйомки
+ Годинник GPS   2024-07-14 17:42:08 UTC
+ Збережено      2024-07-14 20:42:08 +03:00
 
  ДЕ
  Координати     48.858370, 2.294481   ±6 м
+ Градуси        48°51'30.13"N 2°17'40.13"E
  Місце          Avenue Gustave Eiffel, Париж, Іль-де-Франс, Франція
- Напрямок       291° ЗПнЗ  (відносно істинної півночі)
+ Висота         38.4 м над рівнем моря
+ Напрямок       291° ЗхПнЗх  (відносно істинної півночі)
  Рух            нерухомо в момент зйомки
+ Карта          відкрити в OpenStreetMap
+
+ ЗОБРАЖЕННЯ
+ Розміри        4032 × 3024   (12.2 Мп)
+ Експозиція     ISO 64 · f/1.78 · 1/120 с · 6.765 мм
+ Спалах         Off, Did not fire
+ Колір          Uncalibrated
+ Кодування      Baseline DCT, Huffman coding
 
  ЗНАХІДКИ
+ Оригінальність
+  ! Перекодовано універсальною бібліотекою JPEG, а не камерою  (впевненість: низька)
+    Таблиці стиснення належать libjpeg — її використовують ImageMagick, Pillow, GIMP і
+    майже всі сайти, куди завантажують фото. Це доводить, що пікселі стиснули ще раз після
+    того, як їх записала камера, але не вказує, яка саме програма це зробила. Приблизна
+    якість стиснення: 92.
+
+  - Заявлено Apple iPhone 15 Pro, але службовий блок виробника зник  (впевненість:
+    середня)
+    Камери записують службовий блок із внутрішніми налаштуваннями. Майже жодна програма
+    його не зберігає, тож якщо блоку немає — файл перезберігали або назву камери вписали
+    вручну.
+
  Приватність
-  x У файл вбудовано точне місце: Avenue Gustave Eiffel, Париж, Іль-де-Франс, Франція
-    Будь-хто, хто отримає цей файл, прочитає з нього координати 48.858370, 2.294481.
-    Камера оцінила точність приблизно в 6 метрів. Якщо це ваш дім, робота чи місце, де ви
-    буваєте регулярно, тепер про це знає кожен отримувач.
+  x У файлі записано точне місце зйомки: Avenue Gustave Eiffel, Париж, Іль-де-Франс,
+    Франція
+    Координати 48.858370, 2.294481 прочитає з цього файлу будь-хто, кому ви його
+    надішлете. Камера оцінила похибку приблизно в 6 м. Якщо це ваш дім, робота чи місце,
+    де ви буваєте регулярно, — ви віддаєте цю адресу разом зі знімком.
     як прибрати: exiftool -gps:all= -xmp:geotag= -o clean_copy.jpg photo.jpg
 ```
 
@@ -154,16 +196,16 @@ Ukrainian plurals decline properly — `1 обличчя`, `2 обличчя`, `
 ### A whole folder at a glance
 
 ```console
-$ findpic ~/Pictures/*.jpg --summary
+$ findpic *.jpg --summary
 ```
 ```
-!x+  demo.jpg                   Apple iPhone 15 Pro  2024-07-14 19:42  Avenue Gustave Eiffel, Pa
-!~+  IMG_4417.JPG               Apple iPhone 15 Pro  2024-07-14 19:42  no location
-+x!  poly.jpg                   Apple iPhone X       2021-02-27 22:23  Museumplein, Amsterdam
+!x+  demo.jpg                   Apple iPhone 15 Pro  2024-07-14 19:42  Avenue Gustave Eiff
+!~+  d2.jpg                     Apple iPhone 15 Pro  2024-07-14 19:42  no location
 ?++  naked.jpg                  Unknown device       no timestamp      no location
-^^^
-originality, privacy, structure  →  + good   ~ fair   ! poor   x bad   ? unknown
+^^^  originality, privacy, structure  →  + good  ~ fair  ! poor  x bad  ? unknown
 ```
+
+The legend goes to **stderr**, so it explains the glyphs to you and stays out of whatever you pipe the rest into.
 
 ## Telegram bot
 
@@ -335,6 +377,15 @@ pytest -m "not samples"     # skip tests needing real photos in samples/
 ```
 
 Fixture images are generated at test time from ImageMagick and exiftool, so no binaries — and no one's real photographs — live in the repository.
+
+The samples in this README are built the same way:
+
+```bash
+python scripts/make-demo.py demo.jpg
+findpic demo.jpg
+```
+
+Regenerate them after touching a renderer. Every stale line in this file got there by someone changing a renderer and having no way to notice.
 
 ### Adding a rule
 
