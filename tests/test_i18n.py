@@ -7,6 +7,7 @@ rots. An untranslated string should break the build, not quietly ship.
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 
@@ -242,3 +243,54 @@ def test_remediation_commands_are_never_translated(gps_jpeg: Path) -> None:
     uk_fixes = [f.remediation for f in ukrainian.sorted_findings if f.remediation]
     assert en_fixes == uk_fixes
     assert all(fix.startswith("exiftool ") for fix in uk_fixes)
+
+
+def test_no_catalogue_key_is_missing_when_analysing_real_files(
+    fixture_dir: Path, camera_jpeg: Path, gps_jpeg: Path, edited_jpeg: Path, blank_jpeg: Path
+) -> None:
+    """Every key a real report asks for must exist, in every language.
+
+    Translator.get() falls back to returning the key itself, which renders as
+    "source.apple" in the middle of an English sentence and looks like a typo
+    rather than a bug. It hid an entire rule for months: filename_origin asked
+    for 36 keys and not one of them was ever written, in either catalogue, so
+    the two stayed in perfect parity while both were wrong.
+
+    Translator records what it could not find. This asserts it found everything.
+    """
+    from rich.console import Console
+
+    from findpic.analysis import analyze
+    from findpic.analysis.context import AnalysisOptions
+    from findpic.exif import ExifTool
+    from findpic.geocode import Geocoder
+    from findpic.i18n import Translator, available_languages
+    from findpic.render.terminal import render_report
+
+    # Filenames that trip the provenance patterns, so those keys get exercised.
+    named = []
+    for source, name in (
+        (camera_jpeg, "IMG_1234.jpg"),
+        (gps_jpeg, "IMG-20230813-WA0002.jpg"),
+        (edited_jpeg, "Screenshot_20230813-145435.jpg"),
+        (blank_jpeg, "signal-2023-08-13-145435.jpg"),
+    ):
+        target = fixture_dir / name
+        target.write_bytes(source.read_bytes())
+        named.append(target)
+
+    for language in available_languages():
+        translator = Translator(language)
+        console = Console(file=io.StringIO(), width=100, no_color=True)
+        for path in named:
+            report = analyze(
+                path,
+                exiftool=ExifTool(),
+                geocoder=Geocoder(enabled=False, language=language),
+                options=AnalysisOptions(geocode=False, language=language),
+                translator=translator,
+            )
+            render_report(console, report, show_info=True, show_notes=True)
+        assert not translator.missing, (
+            f"{language} catalogue is missing {sorted(translator.missing)}"
+        )
