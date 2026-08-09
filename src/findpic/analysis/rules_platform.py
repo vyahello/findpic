@@ -17,14 +17,19 @@ from .context import Context
 from .registry import rule
 
 #: Longest-edge caps that messaging and social platforms resize down to.
+#:
+#: Every entry names more than one candidate, and that is the honest shape of
+#: this evidence: a dimension is a ceiling several products happen to share, not
+#: a signature. The corpus this was checked against proves the point — two files
+#: land exactly on WhatsApp's cap while contradicting every other WhatsApp
+#: trait, so the number alone would have named the wrong app with confidence.
 KNOWN_CAPS: dict[int, str] = {
-    1280: "Telegram (sent as a photo), WhatsApp",
-    1600: "Facebook, WhatsApp HD",
+    2560: "Telegram (high quality)",
     2048: "Facebook, Twitter/X",
-    1440: "Instagram",
+    1600: "WhatsApp, Viber",
+    1280: "Telegram (sent as a photo)",
     1080: "Instagram, Snapchat",
     960: "older messenger compression",
-    2560: "Telegram (high quality)",
 }
 
 
@@ -52,9 +57,7 @@ def filename_origin(context: Context) -> Iterable[Finding]:
 def stripped_by_pipeline(context: Context) -> Iterable[Finding]:
     """The characteristic shape of a file that went through an upload pipeline."""
     meta = context.meta
-    if context.has_camera_identity or context.device.has_makernotes:
-        return
-    if meta.tag_count > 40:
+    if context.device.has_makernotes or not context.stripped:
         return
 
     image = context.image

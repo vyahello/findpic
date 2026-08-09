@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .exif import ExifTool, ExifToolError, ExifToolTimeout
+from .jpegprint import fingerprint
 
 #: exiftool's own metadata container. Chosen over XMP because XMP silently drops
 #: MakerNotes and anything binary, which on a phone photo is most of what makes
@@ -47,6 +48,26 @@ SIDECAR_SUFFIX = ".mie"
 #: operator. Without it the round trip silently loses 28 entries and the picture
 #: displays with the wrong colours — which is how this was found.
 COPY_ARGS = ("-all:all", "-icc_profile<icc_profile", "-unknown")
+
+#: Written into every restored file, after the donor's tags, so it cannot be
+#: overwritten by them.
+#:
+#: A restored file is a file whose metadata came from somewhere else. Left
+#: unmarked it asserts a camera, a moment and a place with exactly the
+#: confidence of a photograph that recorded them itself, and nothing downstream
+#: — including findpic — can tell the difference. I checked: before this, a
+#: restore across two unrelated photos produced a file findpic graded LIKELY
+#: ORIGINAL and whose fabricated coordinates it printed as the location.
+#:
+#: XMP's media-management history is the right home for it. It is the standard
+#: field for "this file has a processing lineage", every serious tool reads it,
+#: and findpic's own xmp_edit_history rule already does — so marking the file
+#: makes the existing analysis notice, without a special case.
+PROVENANCE_ARGS = (
+    "-XMP-xmpMM:HistoryAction=metadata_restored",
+    "-XMP-xmpMM:HistorySoftwareAgent=findpic",
+    "-XMP-xmpMM:HistoryWhen=now",
+)
 
 
 class RestoreError(ExifToolError):
@@ -126,12 +147,34 @@ def backup(
     return target
 
 
+def _same_frame(donor: Path, target: Path) -> bool | None:
+    """Whether two files hold pictures of the same pixel dimensions.
+
+    ``None`` when either is not a JPEG we can read a frame header out of, in
+    which case the caller has no evidence either way and should say so rather
+    than assume.
+
+    This is not a test of whether the two are the same photograph — nothing
+    short of looking at them is — but differing dimensions do mean the donor's
+    record of its own size, lens and subject distance no longer describes the
+    target. That is the cheap half of the question, and it is the half that
+    catches somebody pointing at the wrong file.
+    """
+    first, second = fingerprint(donor), fingerprint(target)
+    if not (first.ok and second.ok):
+        return None
+    if not (first.width and second.width):
+        return None
+    return (first.width, first.height) == (second.width, second.height)
+
+
 def restore(
     donor: str | os.PathLike[str],
     target: str | os.PathLike[str],
     destination: Path | None = None,
     *,
     exiftool: ExifTool | None = None,
+    force: bool = False,
 ) -> RestoreResult:
     """Copy metadata from ``donor`` onto ``target``, into a new file.
 
@@ -142,6 +185,12 @@ def restore(
     The stripped file is left exactly as it was. It is evidence of what a
     pipeline did to it, and a restore is a judgement call; the two should not be
     the same file.
+
+    Two safeguards, both learned from watching this function forge a photograph.
+    A donor whose picture is a different size is refused unless ``force`` is
+    set, because its dimensions, lens and subject distance describe something
+    else. And the result is always marked as having been restored, so it cannot
+    pass itself off as a file that recorded its own metadata.
     """
     tool = exiftool or ExifTool()
     source = tool._checked_path(donor)  # noqa: SLF001
@@ -149,13 +198,31 @@ def restore(
     if source == stripped:
         raise RestoreError("the donor and the file to restore are the same file")
 
+    if not force and _same_frame(source, stripped) is False:
+        raise RestoreError(
+            f"{source.name} and {stripped.name} hold pictures of different sizes, so the "
+            "metadata in one does not describe the other. Pass force=True (--force) if "
+            "you know they are the same photograph at a different size."
+        )
+
     written = destination or stripped.with_name(f"{stripped.stem}.restored{stripped.suffix}")
     _refuse_to_clobber(written)
 
     before = tool.read(stripped).tag_count
     _run(
         tool,
-        [tool.binary, "-tagsfromfile", str(source), *COPY_ARGS, "-o", str(written), str(stripped)],
+        [
+            tool.binary,
+            "-tagsfromfile",
+            str(source),
+            *COPY_ARGS,
+            # After the copy, so the donor's own history cannot overwrite it.
+            *PROVENANCE_ARGS,
+            f"-XMP-xmpMM:HistoryParameters=metadata restored from {source.name} by findpic",
+            "-o",
+            str(written),
+            str(stripped),
+        ],
     )
     if not written.exists():
         raise RestoreError("exiftool reported success but wrote no file")

@@ -391,3 +391,36 @@ def never_had_it(context: Context) -> Iterable[Finding]:
         params={},
         evidence={"UserComment": marker or None, "filename": context.file.name},
     )
+
+
+@rule("restored_metadata", Category.AUTHENTICITY, order=10)
+def restored_metadata(context: Context) -> Iterable[Finding]:
+    """This file's metadata was copied in from somewhere else.
+
+    Restoring metadata is a legitimate and often necessary thing to do. What is
+    not legitimate is the result passing itself off as a photograph that
+    recorded its own camera, moment and place — because from the outside those
+    are indistinguishable, and every downstream reader, this tool included, will
+    take them at face value.
+
+    So a restored file says so, and this is the rule that reads it back. It
+    outranks everything else in the report: whether the values below can be
+    trusted at all depends on whether the donor really was this photograph, and
+    only the person who chose the donor knows that.
+    """
+    agent = context.meta.str("XMP-xmpMM:HistorySoftwareAgent", "HistorySoftwareAgent") or ""
+    action = context.meta.str("XMP-xmpMM:HistoryAction", "HistoryAction") or ""
+    if "findpic" not in agent.lower() or "metadata_restored" not in action.lower():
+        return
+
+    parameters = context.meta.str("XMP-xmpMM:HistoryParameters", "HistoryParameters") or ""
+    when = context.meta.str("XMP-xmpMM:HistoryWhen", "HistoryWhen") or ""
+    yield Finding(
+        id="recovery.restored",
+        category=Category.AUTHENTICITY,
+        severity=Severity.WARNING,
+        confidence=Confidence.HIGH,
+        params={"detail": parameters or agent},
+        evidence={"HistoryParameters": parameters, "HistoryWhen": when},
+        weight=45,
+    )

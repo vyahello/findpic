@@ -102,6 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="copy metadata from a sidecar or an intact image into a new file",
     )
+    metadata.add_argument(
+        "--force",
+        action="store_true",
+        help="with --restore, accept a donor whose picture is a different size",
+    )
 
     behaviour = parser.add_argument_group("behaviour")
     behaviour.add_argument(
@@ -210,7 +215,7 @@ def run_metadata_write(
                     )
                 )
             else:
-                result = restore(args.restore, path, exiftool=exiftool)
+                result = restore(args.restore, path, exiftool=exiftool, force=args.force)
                 key = "cli.restore.written" if result.recovered else "cli.restore.nothing"
                 console.print(
                     translator.get(

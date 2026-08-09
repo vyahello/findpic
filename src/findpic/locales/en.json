@@ -406,8 +406,8 @@
   "note.download": "A browser named this file, which means it was saved from a page rather than copied from a camera.",
   "finding.platform.stripped.title.known": "Metadata was stripped, and the {longest}px size matches {platforms}",
   "finding.platform.stripped.title.unknown": "Metadata was stripped somewhere along the way",
-  "finding.platform.stripped.detail": "No camera tags, no vendor block, no timestamps. This is exactly what a photo looks like after a messenger or social network re-encoded it for upload — and also exactly what a deliberately scrubbed file looks like. Metadata alone cannot separate the two.",
-  "finding.platform.stripped.detail.known": "No camera tags, no vendor block, no timestamps. This is exactly what a photo looks like after a messenger or social network re-encoded it for upload — and also exactly what a deliberately scrubbed file looks like. Metadata alone cannot separate the two. Its longest edge is exactly {longest} pixels, a size used by {platforms}, which makes a platform re-encode the more likely story.",
+  "finding.platform.stripped.detail": "No camera tags, no vendor block, no timestamps. This is exactly what a photo looks like after a messenger or a social network has handled it — and also exactly what a deliberately scrubbed file looks like. The tags alone cannot separate the two. Whether the picture itself was compressed again or merely repackaged is a different question, and the compression answers it separately.",
+  "finding.platform.stripped.detail.known": "No camera tags, no vendor block, no timestamps. This is exactly what a photo looks like after a messenger or a social network has handled it — and also exactly what a deliberately scrubbed file looks like. The tags alone cannot separate the two. Its longest edge is exactly {longest} pixels, a ceiling used by {platforms}; that makes a platform the more likely story, but it is a ceiling several products share, not a signature.",
   "finding.platform.camera_and_editor.title": "Original camera details survived the trip through {editor}",
   "finding.platform.camera_and_editor.detail": "The file still names the {device} that shot it, even though {editor} wrote the current version. Editors usually preserve Exif while replacing the pixels, so the camera information describes the source photo, not necessarily what you are looking at now.",
   "finding.internal.rule_failed.title": "Internal check '{name}' could not run",
@@ -603,5 +603,7 @@
   "bot.section.traces": "🔍 WHAT THE FILE STILL SHOWS",
   "bot.when.from_filename.second": "from the filename — the tags no longer say",
   "bot.when.from_filename.day": "the day, from the filename. The hour is not recorded anywhere.",
-  "time.day": "{day} {month} {year}"
+  "time.day": "{day} {month} {year}",
+  "finding.recovery.restored.title": "The metadata in this file was restored from another file",
+  "finding.recovery.restored.detail": "findpic wrote this file by copying metadata out of a donor: {detail}. Everything below — the camera, the moment, the place — describes the donor. Whether it also describes this picture depends entirely on whether the donor really was this photograph, and only the person who chose it knows that. Treat these values as a claim someone made about the file, not as something the file recorded about itself. This note is why you can tell; a restored file without it would be indistinguishable from an original."
 }

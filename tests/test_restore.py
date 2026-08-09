@@ -7,6 +7,8 @@ the ones asserting what it does *not* touch.
 from __future__ import annotations
 
 import hashlib
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,19 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def resized(destination: Path, source: Path) -> Path:
+    """A copy of ``source`` at half its width — a different picture, to findpic."""
+    binary = shutil.which("magick") or shutil.which("convert")
+    if binary is None:
+        pytest.skip("ImageMagick is needed to build a differently-sized copy")
+    subprocess.run(
+        [binary, str(source), "-resize", "50%", str(destination)],
+        check=True,
+        capture_output=True,
+    )
+    return destination
+
+
 @pytest.fixture
 def donor(tmp_path: Path, gps_jpeg: Path) -> Path:
     target = tmp_path / "donor.jpg"
@@ -34,9 +49,6 @@ def stripped(tmp_path: Path, gps_jpeg: Path) -> Path:
     """The same picture with its metadata removed — what a messenger returns."""
     target = tmp_path / "stripped.jpg"
     target.write_bytes(gps_jpeg.read_bytes())
-    ExifTool()  # ensure the binary is resolvable before shelling out
-    import subprocess
-
     subprocess.run(
         ["exiftool", "-overwrite_original", "-q", "-all=", str(target)],
         check=True,
@@ -117,8 +129,6 @@ def test_the_colour_profile_survives_the_round_trip(
     Losing it costs 28 entries and leaves the picture displaying in the wrong
     colours — which is how the missing copy argument was noticed at all.
     """
-    import subprocess
-
     subprocess.run(
         ["exiftool", "-overwrite_original", "-q", "-icc_profile<=/dev/null", str(donor)],
         check=False,
@@ -162,3 +172,74 @@ def test_cli_restore_failure_is_an_error_exit(
     main([str(stripped), "--restore", str(donor)])
     capsys.readouterr()
     assert main([str(stripped), "--restore", str(donor)]) == EXIT_ERROR
+
+
+# ------------------------------------------------------- refusing to forge
+
+
+def test_a_donor_of_a_different_size_is_refused(tmp_path: Path, donor: Path) -> None:
+    """The failure this whole safeguard exists for.
+
+    Pointed at two unrelated photographs, restore() will happily produce a file
+    claiming a camera, a moment and a place that were never true of it — and
+    findpic then read that file back and graded it LIKELY ORIGINAL, printing the
+    fabricated coordinates as the location. Differing dimensions are the cheap
+    half of "these are not the same picture", and they catch it.
+    """
+    other = resized(tmp_path / "different.jpg", donor)
+    with pytest.raises(RestoreError, match="different sizes"):
+        restore(donor, other)
+
+
+def test_force_allows_a_deliberate_size_mismatch(tmp_path: Path, donor: Path) -> None:
+    """Restoring onto a resized copy is legitimate — it just has to be meant."""
+    smaller = resized(tmp_path / "smaller.jpg", donor)
+    assert restore(donor, smaller, force=True).written.exists()
+
+
+def test_every_restored_file_says_it_was_restored(donor: Path, stripped: Path) -> None:
+    """Unmarked, a restored file is indistinguishable from an original.
+
+    That is the whole risk: the values assert a camera and a place with exactly
+    the confidence of a photograph that recorded them itself, and nothing
+    downstream can tell. The marker is what makes it visible.
+    """
+    result = restore(donor, stripped)
+    meta = ExifTool().read(result.written)
+    assert "findpic" in (meta.str("HistorySoftwareAgent") or "")
+    assert "metadata_restored" in (meta.str("HistoryAction") or "")
+    assert donor.name in (meta.str("HistoryParameters") or "")
+
+
+def test_findpic_reports_a_restored_file_as_restored(donor: Path, stripped: Path) -> None:
+    """The marker is worthless if the analysis walks past it."""
+    from findpic.analysis import analyze
+    from findpic.analysis.context import AnalysisOptions
+
+    result = restore(donor, stripped)
+    report = analyze(result.written, options=AnalysisOptions(geocode=False))
+    assert "recovery.restored" in {f.id for f in report.findings}
+
+
+def test_the_donor_marker_cannot_be_overwritten_by_the_donor(
+    tmp_path: Path, donor: Path, stripped: Path
+) -> None:
+    """The donor carries its own XMP history in the real world.
+
+    The marker is written after the copy for exactly this reason; if the order
+    ever flips, a donor with a history block would erase the evidence.
+    """
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-q",
+            "-XMP-xmpMM:HistoryAction=edited",
+            "-XMP-xmpMM:HistorySoftwareAgent=SomeEditor 9.0",
+            str(donor),
+        ],
+        check=False,
+        capture_output=True,
+    )
+    result = restore(donor, stripped)
+    assert "findpic" in (ExifTool().read(result.written).str("HistorySoftwareAgent") or "")
