@@ -18,6 +18,7 @@ from .geocode import Geocoder
 from .i18n import LANGUAGE_NAMES, Translator, available_languages, detect_language
 from .models import Report, Severity, VerdictLevel
 from .render.terminal import LEVEL_GLYPH, LEVEL_STYLE, render_report
+from .restore import RestoreError, backup, restore
 
 IMAGE_SUFFIXES = {
     ".jpg",
@@ -66,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
             "  findpic album/ --recursive         walk a directory\n"
             "  findpic photo.jpg --json           machine-readable output\n"
             "  findpic photo.jpg --no-geocode     never touch the network\n"
+            "\n"
+            "Metadata is only restorable if a copy of it exists. Make one first:\n"
+            "  findpic photo.jpg --backup               write photo.jpg.mie beside it\n"
+            "  findpic stripped.jpg --restore photo.jpg.mie\n"
+            "  findpic stripped.jpg --restore original.jpg    (any donor that still has it)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -79,6 +85,23 @@ def build_parser() -> argparse.ArgumentParser:
     output.add_argument("--quiet", "-q", action="store_true", help="hide informational findings")
     output.add_argument("--notes", action="store_true", help="show exiftool's own warnings")
     output.add_argument("--no-color", action="store_true", help="disable colour and styling")
+
+    metadata = parser.add_argument_group(
+        "metadata",
+        "Write operations. Both leave every input file exactly as it was.",
+    )
+    metadata.add_argument(
+        "--backup",
+        action="store_true",
+        help="write a sidecar holding every tag, so it can be restored later",
+    )
+    metadata.add_argument(
+        "--restore",
+        metavar="DONOR",
+        type=Path,
+        default=None,
+        help="copy metadata from a sidecar or an intact image into a new file",
+    )
 
     behaviour = parser.add_argument_group("behaviour")
     behaviour.add_argument(
@@ -160,12 +183,59 @@ def worst_level(report: Report) -> VerdictLevel:
     return max(levels, key=lambda level: level.rank) if levels else VerdictLevel.UNKNOWN
 
 
+def run_metadata_write(
+    args: argparse.Namespace,
+    targets: list[Path],
+    console: Console,
+    errors: Console,
+    exiftool: ExifTool,
+    translator: Translator,
+) -> int:
+    """Handle --backup and --restore.
+
+    Kept apart from the reporting path on purpose: analysis prints and exits on
+    what it found, while a write either happened or did not, and conflating the
+    two exit codes would make a failed restore look like a clean photo.
+    """
+    failures = 0
+    for path in targets:
+        try:
+            if args.backup:
+                written = backup(path, exiftool=exiftool)
+                console.print(
+                    translator.get(
+                        "cli.backup.written",
+                        sidecar=written.name,
+                        size=translator.bytes(written.stat().st_size),
+                    )
+                )
+            else:
+                result = restore(args.restore, path, exiftool=exiftool)
+                key = "cli.restore.written" if result.recovered else "cli.restore.nothing"
+                console.print(
+                    translator.get(
+                        key,
+                        result.recovered,
+                        target=result.written.name,
+                        count=result.recovered,
+                    )
+                )
+        except (RestoreError, ExifToolError, OSError) as exc:
+            errors.print(f"[red]{path.name}:[/] {exc}")
+            failures += 1
+    return EXIT_ERROR if failures else EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
     if not args.paths:
         parser.print_help()
+        return EXIT_ERROR
+
+    if args.backup and args.restore:
+        print("--backup and --restore do different things; run them one at a time.")
         return EXIT_ERROR
 
     no_color = args.no_color or bool(os.environ.get("NO_COLOR"))
@@ -199,6 +269,9 @@ def main(argv: list[str] | None = None) -> int:
     if not targets:
         errors.print(f"[yellow]{translator.get('cli.error.no_images')}[/]")
         return EXIT_ERROR
+
+    if args.backup or args.restore:
+        return run_metadata_write(args, targets, console, errors, exiftool, translator)
 
     reports: list[Report] = []
     failures = 0

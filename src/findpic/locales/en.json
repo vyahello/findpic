@@ -582,5 +582,11 @@
   "finding.recovery.filename_time.title.second": "The capture time survives in the filename: {moment}",
   "finding.recovery.filename_time.title.day": "The date survives in the filename: {moment}",
   "finding.recovery.filename_time.detail.second": "The metadata no longer says when this was taken, but {source} wrote the moment into the name — «{matched}» — and that came from the same clock as the deleted tag. This is the one piece of what was removed that you can genuinely put back. Filenames are trivially renamed, so check it looks right before you trust it; the command below writes the value into a new file and leaves this one alone.",
-  "finding.recovery.filename_time.detail.day": "The metadata no longer says when this was taken. {source} wrote a date into the name — «{matched}» — but only a date: the digits that follow are a counter, not a time of day. So the day is good evidence and the hour is not known at all. The command below would put midnight on the photo, which is a placeholder, not the moment the shutter opened — write it only if a date-only stamp is what you want."
+  "finding.recovery.filename_time.detail.day": "The metadata no longer says when this was taken. {source} wrote a date into the name — «{matched}» — but only a date: the digits that follow are a counter, not a time of day. So the day is good evidence and the hour is not known at all. The command below would put midnight on the photo, which is a placeholder, not the moment the shutter opened — write it only if a date-only stamp is what you want.",
+  "cli.backup.written": "Backed up to {sidecar} ({size}). Keep it — it is the only thing that can restore this file's metadata.",
+  "cli.restore.written": {
+    "one": "Wrote {target} with {count} tag recovered.",
+    "other": "Wrote {target} with {count} tags recovered."
+  },
+  "cli.restore.nothing": "Wrote {target}, but nothing was recovered — the donor had nothing this file did not."
 }
