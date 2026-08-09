@@ -568,5 +568,15 @@
   "compass.full.nw": "north-west",
   "compass.full.nnw": "north-north-west",
   "detail.mm": "{value} mm",
-  "bot.map.open": "Open on the map"
+  "bot.map.open": "Open on the map",
+  "finding.recovery.encoder_library.title": "Compressed by a general-purpose JPEG library, at quality {quality}",
+  "finding.recovery.encoder_library.detail": "The quantization tables are the example tables from the JPEG standard, scaled to quality {quality} — the exact arithmetic libjpeg uses, and with it Pillow, ImageMagick, PHP, Go and nearly every website that resizes an upload. A camera does not compress this way. The picture was therefore encoded again after it left the device, which costs detail permanently and is why nothing here identifies a camera.",
+  "finding.recovery.encoder_vendor.title": "Compressed by a device, not by a general-purpose library",
+  "finding.recovery.encoder_vendor.detail": "The quantization tables are not the standard library ones: the first two rows repeat, which no scaling of the standard tables can produce. Tables of that shape are chosen by camera and phone pipelines. It says the compression came from a device — not which device, and not when or where. That was in the tags, and the tags are gone.",
+  "finding.recovery.container_rewritten.title": "The file was repackaged, but the picture was not compressed again",
+  "finding.recovery.container_rewritten.detail": "The compression tables belong to the device that took the photo, while the wrapper around them — a JFIF header, the tables split across several segments and placed after the frame — belongs to a general-purpose library. So the compressed picture was copied through untouched and only the container was rebuilt. That is what removing metadata looks like from the inside. Your image has lost no quality; it has lost its tags.",
+  "finding.recovery.preview_older.title": "The embedded preview predates the picture beside it",
+  "finding.recovery.preview_older.detail": "The main image carries library tables at quality {quality}, so it was compressed again somewhere along the way. The small preview inside it was not — its tables are a device's. A camera writes both at the same moment, so this preview survived from before the re-encode. It is the last piece of the original file still present, and the only part of it that is still the camera's own work.",
+  "finding.recovery.preview_shape.title": "The preview is a different shape from the picture: {preview} against {image}",
+  "finding.recovery.preview_shape.detail": "A preview is written once and then carried along. When an image is cropped by something that does not rebuild it, the preview keeps the original framing — which is how redacted photographs have ended up publishing the very thing that was cut out of them. Extract it and look: either it shows more than the picture does, or a tool simply wrote a careless preview. The file cannot tell you which, but your eyes can."
 }

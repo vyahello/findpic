@@ -79,6 +79,23 @@ def camera_jpeg(fixture_dir: Path) -> Path:
 
 
 @pytest.fixture(scope="session")
+def thumbnailed_jpeg(fixture_dir: Path) -> Path:
+    """A JPEG carrying a small Exif preview, as every camera writes one."""
+    path = fixture_dir / "thumbnailed.jpg"
+    preview = fixture_dir / "preview-source.jpg"
+    _magick("-size", "480x360", "gradient:navy-gold", str(path))
+    _magick("-size", "160x120", "gradient:navy-gold", str(preview))
+    _exiftool(
+        "-Make=TestCorp",
+        "-Model=TestCam 900",
+        "-DateTimeOriginal=2023:06:15 14:30:00",
+        f"-ThumbnailImage<={preview}",
+        str(path),
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
 def gps_jpeg(fixture_dir: Path) -> Path:
     """A JPEG with coordinates, a named owner and a caption."""
     path = fixture_dir / "gps.jpg"

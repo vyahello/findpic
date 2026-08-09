@@ -293,6 +293,35 @@ class JpegPrint:
         return bool(frames) and order.index(0xDB) < frames[0]
 
 
+def embedded_thumbnail(data: bytes) -> bytes | None:
+    """The preview JPEG stored inside the Exif block, if there is one.
+
+    Located by walking, not by trusting IFD1's ThumbnailOffset: that offset is
+    relative to a TIFF header whose own position depends on the segment, and a
+    file that has been rewritten by three different tools is exactly the file
+    where an off-by-six lands you in the middle of the picture. The thumbnail is
+    the only complete JPEG inside the Exif segment, so finding its SOI and
+    walking to the matching EOI needs no arithmetic that can be wrong.
+
+    Worth having because the thumbnail is written once, early, and then tends to
+    be carried along untouched. It can therefore disagree with the image around
+    it — a different encoder, or a different shape — and each disagreement says
+    something about what happened to the file after the picture was taken.
+    """
+    for segment in _parse(data).segments:
+        if segment.marker != 0xE1 or segment.identifier != "Exif":
+            continue
+        body = data[segment.offset + 4 : segment.offset + 2 + segment.length]
+        start = body.find(b"\xff\xd8\xff")
+        if start < 0:
+            return None
+        end = body.rfind(b"\xff\xd9")
+        if end <= start:
+            return None
+        return bytes(body[start : end + 2])
+    return None
+
+
 def _parse(data: bytes) -> JpegPrint:
     """Walk marker segments until the scan starts. Never touches scan data."""
     if not data.startswith(b"\xff\xd8"):

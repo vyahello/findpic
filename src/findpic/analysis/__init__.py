@@ -8,6 +8,7 @@ from ..container import scan as scan_container
 from ..exif import ExifTool, Metadata
 from ..geocode import Geocoder
 from ..i18n import Translator
+from ..jpegprint import MAX_HEADER_BYTES, embedded_thumbnail, fingerprint_bytes
 from ..models import Report
 
 # Importing the rule packs registers them. Keep this after the registry import.
@@ -16,6 +17,7 @@ from . import (
     rules_authenticity,  # noqa: F401,E402
     rules_platform,  # noqa: F401,E402
     rules_privacy,  # noqa: F401,E402
+    rules_recovery,  # noqa: F401,E402
     rules_structure,  # noqa: F401,E402
 )
 from .context import AnalysisOptions, Context
@@ -38,6 +40,23 @@ __all__ = [
     "analyze_metadata",
     "all_rules",
 ]
+
+
+def _fingerprint(context: Context, path: Path) -> None:
+    """Read the compression structure, and the preview's separately.
+
+    Bounded by design: only the header is read, and nothing is decoded, so this
+    costs a few seeks even on a file that claims to be enormous. A file we
+    cannot open is not an error here — the rest of the report still stands.
+    """
+    try:
+        header = path.open("rb").read(MAX_HEADER_BYTES)
+    except OSError:
+        return
+    context.jpeg = fingerprint_bytes(header)
+    preview = embedded_thumbnail(header)
+    if preview:
+        context.thumbnail = fingerprint_bytes(preview)
 
 
 def analyze(
@@ -86,6 +105,9 @@ def analyze_metadata(
 
     if options.scan_container:
         context.container = scan_container(path)
+
+    if options.fingerprint_encoder:
+        _fingerprint(context, path)
 
     if options.geocode and context.location.present:
         active = geocoder or Geocoder(enabled=True, language=options.language)

@@ -166,3 +166,47 @@ def test_no_pixels_are_decoded_even_for_a_huge_frame() -> None:
     data = b"\xff\xd8" + b"\xff\xc0" + struct.pack(">H", len(body) + 2) + body + b"\xff\xd9"
     result = fingerprint_bytes(data)
     assert (result.width, result.height) == (60000, 60000)
+
+
+# -------------------------------------------------------------- thumbnails
+
+
+def test_the_embedded_thumbnail_is_found_by_walking_not_by_offset(
+    thumbnailed_jpeg: Path,
+) -> None:
+    """What we carve out must be exactly what exiftool reports.
+
+    IFD1's ThumbnailOffset is relative to a TIFF header whose position shifts
+    with the segment, and a file rewritten by three tools is where an off-by-six
+    puts you inside the picture. So this compares a walked result against
+    exiftool's own extraction, byte for byte.
+    """
+    from findpic.jpegprint import embedded_thumbnail
+
+    carved = embedded_thumbnail(thumbnailed_jpeg.read_bytes())
+    assert carved is not None
+    assert carved == ExifTool().extract_binary(thumbnailed_jpeg, "ThumbnailImage")
+
+
+def test_a_thumbnail_is_fingerprinted_independently_of_its_parent(
+    thumbnailed_jpeg: Path,
+) -> None:
+    """The preview has its own tables, and they need not match the image's.
+
+    That is the point: a pipeline can rewrite the main image and carry the old
+    preview through untouched, and the disagreement is the evidence.
+    """
+    from findpic.jpegprint import embedded_thumbnail
+
+    carved = embedded_thumbnail(thumbnailed_jpeg.read_bytes())
+    assert carved is not None
+    thumb = fingerprint_bytes(carved)
+    assert thumb.ok
+    assert thumb.width and thumb.height
+    assert thumb.width <= 320 and thumb.height <= 320
+
+
+def test_a_file_without_a_thumbnail_returns_none(blank_jpeg: Path) -> None:
+    from findpic.jpegprint import embedded_thumbnail
+
+    assert embedded_thumbnail(blank_jpeg.read_bytes()) is None
