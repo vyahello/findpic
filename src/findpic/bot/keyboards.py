@@ -45,7 +45,7 @@ def language_keyboard(current: str) -> InlineKeyboardMarkup:
 
 
 def report_keyboard(
-    translator: Translator, token: str, *, offer_clean: bool
+    translator: Translator, token: str, *, offer_clean: bool, offer_backup: bool = False
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if offer_clean:
@@ -57,6 +57,11 @@ def report_keyboard(
         text=translator.get("bot.button.tags"),
         callback_data=AnalysisCallback(action="tags", token=token),
     )
+    if offer_backup:
+        builder.button(
+            text=translator.get("bot.button.backup"),
+            callback_data=AnalysisCallback(action="backup", token=token),
+        )
     builder.button(
         text=translator.get("bot.button.language"),
         callback_data=LanguageCallback(code="menu"),

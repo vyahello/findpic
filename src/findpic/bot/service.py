@@ -29,6 +29,7 @@ from ..analysis import AnalysisOptions, analyze
 from ..exif import ExifTool
 from ..geocode import Geocoder
 from ..models import Report
+from ..restore import SIDECAR_SUFFIX, backup
 from .config import Config
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,33 @@ class AnalysisService:
         finally:
             local.unlink(missing_ok=True)
             self._delete_source(server_path)
+
+    async def backup(self, *, bot: Bot, file_id: str, file_name: str) -> tuple[bytes, str]:
+        """Return ``(bytes, filename)`` for a sidecar that can restore this file.
+
+        The counterpart to :meth:`clean`. Offering to strip a photo without
+        offering to keep a copy of what is being stripped is how somebody loses
+        the only record of where and when a picture was taken.
+        """
+        local, server_path = await self._fetch(bot, file_id, file_name)
+        try:
+            sidecar = await asyncio.to_thread(self._sidecar, local)
+            data = sidecar.read_bytes()
+            sidecar.unlink(missing_ok=True)
+            return data, f"{Path(file_name).name}{SIDECAR_SUFFIX}"
+        finally:
+            local.unlink(missing_ok=True)
+            self._delete_source(server_path)
+
+    def _sidecar(self, source: Path) -> Path:
+        """Build the sidecar in scratch space, outside the temporary directory
+        that the caller is about to delete."""
+        handle, name = tempfile.mkstemp(suffix=SIDECAR_SUFFIX, dir=self.config.work_dir)
+        os.close(handle)
+        output = Path(name)
+        # backup() refuses to overwrite, and mkstemp has already created it.
+        output.unlink()
+        return backup(source, output, exiftool=self.exiftool)
 
     def _count_tags(self, path: Path) -> int:
         try:

@@ -417,3 +417,46 @@ def test_media_and_command_routers_are_separate() -> None:
 
     assert media_router is not router
     assert media_router.name == "findpic-media"
+
+
+def test_the_tag_dump_says_it_is_not_a_backup() -> None:
+    """The caption has to carry the warning, in every language.
+
+    The button is called "show every raw tag" and it hands back a text file.
+    People reasonably read that as a backup and strip the original afterwards.
+    It cannot be written back — the values are formatted for reading and the
+    binary tags are described rather than included — so the caption is the only
+    place that can stop someone losing their metadata.
+    """
+    import re
+
+    from findpic.i18n import Translator, available_languages
+
+    for language in available_languages():
+        translator = Translator(language)
+        # The caption is HTML; compare against it with the markup taken out, so
+        # bolding a phrase does not silently break the check.
+        caption = re.sub(r"<[^>]+>", "", translator.get("bot.tags.caption", count=5))
+        assert "⚠️" in caption, language
+        assert translator.get("bot.button.backup") in caption, language
+
+
+def test_the_backup_button_only_appears_when_there_is_something_to_lose(
+    gps_jpeg: Path, blank_jpeg: Path
+) -> None:
+    """Offering a backup of nothing is noise; withholding one is data loss.
+
+    The button rides alongside the clean-copy button on purpose. Whenever
+    findpic offers to remove metadata it must also offer to keep a copy.
+    """
+    from findpic.bot.keyboards import report_keyboard
+    from findpic.i18n import Translator
+
+    translator = Translator("en")
+    label = translator.get("bot.button.backup")
+
+    offered = report_keyboard(translator, "tok", offer_clean=True, offer_backup=True)
+    assert any(button.text == label for row in offered.inline_keyboard for button in row)
+
+    withheld = report_keyboard(translator, "tok", offer_clean=False, offer_backup=False)
+    assert not any(button.text == label for row in withheld.inline_keyboard for button in row)

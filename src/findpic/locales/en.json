@@ -457,7 +457,7 @@
   "bot.button.source": "📖 Source code",
   "bot.note.compressed.title": "Telegram already stripped this one",
   "bot.note.compressed.body": "You sent it as a photo, so Telegram re-compressed it and removed the metadata before it reached me. Send the same picture as a <b>file</b> (paperclip → File, compression off) and I can read the original.",
-  "bot.tags.caption": "Every tag I could read — {count} of them.",
+  "bot.tags.caption": "Every tag I could read — {count} of them.\n\n⚠️ This is a report, not a backup. It cannot be written back: the values are formatted for you to read, and anything binary is described rather than included. If you want a copy you can restore from, use 💾 <b>Backup the metadata</b>.",
   "bot.clean.caption": "🧹 Here is your clean copy. {removed} metadata tags removed; orientation and colour kept so it still displays correctly.\n\nYour original is untouched.",
   "bot.status.working": "Reading the metadata…",
   "bot.status.cleaning": "Making a clean copy…",
@@ -588,5 +588,8 @@
     "one": "Wrote {target} with {count} tag recovered.",
     "other": "Wrote {target} with {count} tags recovered."
   },
-  "cli.restore.nothing": "Wrote {target}, but nothing was recovered — the donor had nothing this file did not."
+  "cli.restore.nothing": "Wrote {target}, but nothing was recovered — the donor had nothing this file did not.",
+  "bot.button.backup": "💾 Backup the metadata",
+  "bot.backup.caption": "💾 A complete backup of this photo's metadata — {size}, everything included.\n\nKeep it somewhere safe. If you ever strip this photo or a service does it for you, this file puts the metadata back:\n\n<code>exiftool -tagsfromfile {name} -all:all \"-icc_profile&lt;icc_profile\" -unknown -o restored.jpg stripped.jpg</code>",
+  "bot.backup.failed": "I could not build a backup for this file."
 }

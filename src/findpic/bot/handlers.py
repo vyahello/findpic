@@ -334,7 +334,12 @@ async def _analyse_and_reply(
     await message.answer(
         body,
         reply_markup=report_keyboard(
-            t, token, offer_clean=_worth_cleaning(report) and not compressed
+            t,
+            token,
+            offer_clean=_worth_cleaning(report) and not compressed,
+            # Never offer to strip a file without offering to keep a copy of
+            # what is about to be removed.
+            offer_backup=_worth_cleaning(report) and not compressed,
         ),
         disable_web_page_preview=True,
     )
@@ -382,6 +387,37 @@ async def handle_show_tags(
     await query.message.answer_document(
         BufferedInputFile(dump, filename=f"{Path(report.file.name).stem}.metadata.txt"),
         caption=t.get("bot.tags.caption", count=report.tag_count),
+    )
+
+
+@router.callback_query(AnalysisCallback.filter(F.action == "backup"))
+async def handle_backup(
+    query: CallbackQuery,
+    callback_data: AnalysisCallback,
+    bot: Bot,
+    t: Translator,
+    storage: Storage,
+    service: AnalysisService,
+) -> None:
+    handle = await storage.recall_analysis(callback_data.token, query.from_user.id)
+    if handle is None:
+        await query.answer(t.get("bot.error.expired"), show_alert=True)
+        return
+
+    await query.answer(t.get("bot.status.working"))
+    await bot.send_chat_action(query.message.chat.id, ChatAction.UPLOAD_DOCUMENT)
+    try:
+        data, name = await service.backup(
+            bot=bot, file_id=handle.file_id, file_name=handle.file_name or "photo.jpg"
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("backup failed")
+        await query.message.answer(t.get("bot.backup.failed"))
+        return
+
+    await query.message.answer_document(
+        BufferedInputFile(data, filename=name),
+        caption=t.get("bot.backup.caption", size=t.bytes(len(data)), name=name),
     )
 
 
