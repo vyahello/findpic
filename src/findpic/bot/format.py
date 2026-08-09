@@ -39,6 +39,7 @@ from ..interpret import (
     describe_subject_distance,
 )
 from ..models import Category, Report, Severity, VerdictLevel
+from ..recover import timestamp_from_filename
 from ..util import parse_exif_datetime
 
 #: Telegram's hard limit. We aim below it and fold the rest away.
@@ -52,6 +53,18 @@ ORIGINALITY_MARK: dict[VerdictLevel, str] = {
     VerdictLevel.BAD: "⚠️",
     VerdictLevel.UNKNOWN: "❔",
 }
+
+#: What the compression admits when the tags are gone. Deliberately short: the
+#: restart-interval and one-dpi findings corroborate these and would read as
+#: filler beside them, so they stay in the terminal report and the tag dump.
+TRACE_FINDINGS = (
+    "recovery.encoder_library",
+    "recovery.encoder_vendor",
+    "recovery.container_rewritten",
+    "recovery.preview_older",
+    "recovery.preview_shape",
+    "recovery.screenshot",
+)
 
 #: Privacy findings whose substance is already on screen in another section.
 #: Repeating them is what made the old privacy block read as filler.
@@ -152,10 +165,20 @@ def _format_date(moment: dt.datetime, translator: Translator) -> str:
     )
 
 
+def _format_day(moment: dt.datetime, translator: Translator) -> str:
+    """A date with no time, for when only the day is known."""
+    return translator.get(
+        "time.day",
+        day=moment.day,
+        month=translator.get(f"time.month.{moment.month}"),
+        year=moment.year,
+    )
+
+
 def render_when(report: Report) -> list[str]:
     t, capture = report.translator, report.capture
     if not capture.taken:
-        return []
+        return _render_when_from_filename(report)
 
     moment = parse_exif_datetime(capture.taken)
     lines: list[str] = []
@@ -173,6 +196,54 @@ def render_when(report: Report) -> list[str]:
     if capture.modified and capture.modified_matches_taken is False:
         lines.append(f"✏️ {esc(t.get('bot.when.modified', value=capture.modified))}")
     return _block(t.get("bot.section.when"), lines)
+
+
+def _render_when_from_filename(report: Report) -> list[str]:
+    """The capture time when the tags no longer carry one.
+
+    A messenger deletes the timestamp and then hands the file over under a name
+    containing it. That is the one piece of what was removed that can genuinely
+    be put back, so it belongs under КОЛИ like any other capture time — but
+    labelled, because it came from the name and a name can be changed.
+    """
+    t = report.translator
+    found = timestamp_from_filename(report.file.name)
+    if found is None:
+        return []
+
+    if found.is_exact:
+        lines = [f"<b>{esc(_format_date(found.moment, t))}</b>"]
+        when = t.describe_when(found.moment)
+        if when:
+            lines.append(esc(when))
+    else:
+        # Only the day is known. Printing 00:00:00 would invent an hour.
+        lines = [f"<b>{esc(_format_day(found.moment, t))}</b>"]
+    lines.append(f"📄 {esc(t.get(f'bot.when.from_filename.{found.precision}'))}")
+    return _block(t.get("bot.section.when"), lines)
+
+
+def render_traces(report: Report) -> list[str]:
+    """What the compression says, on a file whose tags are gone.
+
+    Only for that case. On a photo that still knows its own camera these would
+    be structural trivia buried under the answers the reader actually wanted;
+    on a stripped one they are the only answers there are, and without them the
+    message reads as "findpic found nothing" rather than "there is nothing left
+    to find".
+
+    Titles only. The reasoning behind each is long, correctly so in a terminal,
+    and would swamp a chat message.
+    """
+    t = report.translator
+    if report.capture.taken or report.device.make or report.device.model:
+        return []
+    lines = [
+        f"• {esc(finding.title(t))}"
+        for finding in report.sorted_findings
+        if finding.id in TRACE_FINDINGS
+    ]
+    return _block(t.get("bot.section.traces"), lines)
 
 
 def render_where(report: Report) -> list[str]:
@@ -322,6 +393,7 @@ def render_report(report: Report, *, source_note: str = "") -> str:
         + render_when(report)
         + render_where(report)
         + render_shot(report)
+        + render_traces(report)
         + render_exposure_risks(report)
     )
 

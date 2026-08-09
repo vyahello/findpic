@@ -492,7 +492,7 @@
   "bot.originality.fair": "Looks original; small inconsistencies.",
   "bot.originality.poor": "Edited, cropped or re-saved after capture.",
   "bot.originality.bad": "The metadata contradicts itself — do not trust it.",
-  "bot.originality.unknown": "No metadata left — nothing to verify.",
+  "bot.originality.unknown": "Nothing here names a camera, so there is no original to check against.",
   "bot.when.modified": "Last written {value}",
   "detail.equivalent": "{value} equiv.",
   "detail.megapixels": "{value} MP",
@@ -599,5 +599,9 @@
   "finding.recovery.one_dpi.title": "The file claims a print resolution of one dot per inch",
   "finding.recovery.one_dpi.detail": "Cameras write 72 here, every time. A 1 is not a resolution anyone chose: it is what happens when a program copies a JFIF density field — where 1×1 means «no density, treat these as an aspect ratio» — into an Exif tag whose unit is inches. Nothing about the picture is affected. It is worth knowing because it identifies the program that rewrote the file, which is how two stripped photos can be tied to the same source.",
   "finding.recovery.screenshot.title": "This is a screen capture — the missing metadata never existed",
-  "finding.recovery.screenshot.detail": "Nothing was photographed here, so there was never a camera, a lens or a place to record. That matters because it changes what the empty fields mean: on a photo, no location means somebody removed one; on a screenshot, there was never a location to remove, and looking for the original is looking for something that has never existed anywhere. What the file does tell you is when the screen was captured, and on which kind of device."
+  "finding.recovery.screenshot.detail": "Nothing was photographed here, so there was never a camera, a lens or a place to record. That matters because it changes what the empty fields mean: on a photo, no location means somebody removed one; on a screenshot, there was never a location to remove, and looking for the original is looking for something that has never existed anywhere. What the file does tell you is when the screen was captured, and on which kind of device.",
+  "bot.section.traces": "🔍 WHAT THE FILE STILL SHOWS",
+  "bot.when.from_filename.second": "from the filename — the tags no longer say",
+  "bot.when.from_filename.day": "the day, from the filename. The hour is not recorded anywhere.",
+  "time.day": "{day} {month} {year}"
 }

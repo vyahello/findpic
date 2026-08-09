@@ -460,3 +460,69 @@ def test_the_backup_button_only_appears_when_there_is_something_to_lose(
 
     withheld = report_keyboard(translator, "tok", offer_clean=False, offer_backup=False)
     assert not any(button.text == label for row in withheld.inline_keyboard for button in row)
+
+
+def report_for(path: Path, language: str = "en"):
+    return analyze(path, options=AnalysisOptions(geocode=False, language=language))
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_a_recovered_capture_time_reaches_the_message(tmp_path: Path, blank_jpeg: Path) -> None:
+    """The analysis finding it is not enough — the reader has to see it.
+
+    The bot message is built from fixed sections, not from the finding list, so
+    a rule can succeed and still be invisible. This one was: the capture time
+    was read out of the filename and never rendered, which is the single most
+    useful thing findpic can tell someone about a stripped photo.
+    """
+    from findpic.bot.format import render_report
+
+    target = tmp_path / "IMG_20230813_145435.jpg"
+    target.write_bytes(blank_jpeg.read_bytes())
+    body = render_report(report_for(target))
+    assert "2023" in body
+    assert "14:54:35" in body
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_a_date_only_filename_does_not_invent_an_hour(tmp_path: Path, blank_jpeg: Path) -> None:
+    """WhatsApp's counter must not be rendered as midnight."""
+    from findpic.bot.format import render_report
+
+    target = tmp_path / "IMG-20230813-WA0002.jpg"
+    target.write_bytes(blank_jpeg.read_bytes())
+    body = render_report(report_for(target))
+    assert "2023" in body
+    assert "00:00" not in body
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_a_stripped_file_still_gets_a_message_with_something_in_it(
+    tmp_path: Path, camera_jpeg: Path
+) -> None:
+    """An empty report reads as a broken bot rather than as an empty file."""
+    import subprocess
+
+    from findpic.bot.format import render_report
+
+    target = tmp_path / "stripped.jpg"
+    target.write_bytes(camera_jpeg.read_bytes())
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-all=", str(target)],
+        check=True,
+        capture_output=True,
+    )
+    body = render_report(report_for(target))
+    from findpic.i18n import Translator
+
+    assert Translator("en").get("bot.section.traces") in body
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_an_intact_photo_gets_no_traces_section(camera_jpeg: Path) -> None:
+    """These belong to the case where nothing else is left to say."""
+    from findpic.bot.format import render_report
+    from findpic.i18n import Translator
+
+    body = render_report(report_for(camera_jpeg))
+    assert Translator("en").get("bot.section.traces") not in body
