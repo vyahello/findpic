@@ -159,57 +159,58 @@ def sparkline(values: list[int]) -> str:
 # ------------------------------------------------------------ getting the file
 
 
-def pull(ssh_host: str, volume: str, image: str, into: Path) -> Path:
-    """Copy the database out of the server's Docker volume, over ssh.
+def volume_command(volume: str, image: str) -> list[str]:
+    """Stream the database out of a Docker volume as a tar on stdout.
 
-    Streams a tar to stdout rather than leaving a copy on the server or needing
-    scp. The volume is mounted read-only, so this cannot disturb the running
-    bot — the worst it can do is catch the database mid-write, which SQLite's
-    write-ahead log is designed to survive.
+    A throwaway container rather than a path, because the volume's directory
+    under /var/lib/docker belongs to root: anybody in the docker group can read
+    it this way without sudo, and it is the same command whether it runs here or
+    at the far end of an ssh connection. Mounted read-only, so it cannot disturb
+    the running bot — the worst it can do is catch the database mid-write, which
+    SQLite's write-ahead log is designed to survive.
+
+    ``cd`` rather than ``tar -C``: the glob is expanded by the container's shell
+    before tar ever sees it, and would otherwise look in the container's root.
     """
-    # ssh joins its arguments with spaces and hands the result to the remote
-    # login shell, so quoting has to survive that trip explicitly — otherwise
-    # the `sh -c` payload comes apart and half of it runs on the host instead
-    # of inside the container. cd rather than `tar -C`, because the glob is
-    # expanded by the container's shell before tar ever sees it.
-    remote = shlex.join(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "-v",
-            f"{volume}:/data:ro",
-            image,
-            "sh",
-            "-c",
-            f"cd /data && tar -cf - {DB_NAME}*",
-        ]
-    )
-    argv = ["ssh", ssh_host, remote]
-    print(f"pulling {DB_NAME} from {ssh_host}:{volume} …", file=sys.stderr)
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "-v",
+        f"{volume}:/data:ro",
+        image,
+        "sh",
+        "-c",
+        f"cd /data && tar -cf - {DB_NAME}*",
+    ]
+
+
+def pull(argv: list[str], into: Path, source: str, volume: str) -> Path:
+    """Run a tar-producing command and unpack the database out of its output."""
+    print(f"pulling {DB_NAME} from {source} …", file=sys.stderr)
     result = subprocess.run(argv, capture_output=True, check=False)
     if result.returncode != 0 or not result.stdout:
         detail = result.stderr.decode("utf-8", "replace").strip().splitlines()
         raise SystemExit(
-            f"could not read the volume on {ssh_host}: "
+            f"could not read {source}: "
             + (detail[-1] if detail else "no output")
             + f"\n  check the volume name (docker volume ls) — assumed {volume!r}"
         )
 
-    # The tar arrives from a machine this script does not control, so members
+    # The tar may come from a machine this script does not control, so members
     # are unpacked by hand: regular files only, basenames only, nothing else.
     with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
         for member in archive:
             name = Path(member.name).name
             if not member.isfile() or not name.startswith(DB_NAME):
                 continue
-            source = archive.extractfile(member)
-            if source is not None:
-                (into / name).write_bytes(source.read())
+            handle = archive.extractfile(member)
+            if handle is not None:
+                (into / name).write_bytes(handle.read())
 
     database = into / DB_NAME
     if not database.exists():
-        raise SystemExit(f"{ssh_host}:{volume} holds no {DB_NAME}")
+        raise SystemExit(f"{source} holds no {DB_NAME}")
     return database
 
 
@@ -675,7 +676,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Who used the findpic Telegram bot, when, and with what.",
         epilog=(
             "Examples:\n"
-            "  scripts/bot-stats.py --ssh you@server            last 30 days\n"
+            "  scripts/bot-stats.py --docker                    on the server itself\n"
+            "  scripts/bot-stats.py --ssh you@server            from your laptop\n"
             "  scripts/bot-stats.py --ssh you@server --all      everything kept\n"
             "  scripts/bot-stats.py --db bot.sqlite3 --json     machine-readable\n"
             "  scripts/bot-stats.py --ssh you@server --user 12345678\n"
@@ -689,10 +691,15 @@ def build_parser() -> argparse.ArgumentParser:
     source = parser.add_argument_group("where the database is")
     source.add_argument("--db", type=Path, help="path to findpic-bot.sqlite3")
     source.add_argument(
+        "--docker",
+        action="store_true",
+        help="read it out of the local Docker volume (needs the docker group, not root)",
+    )
+    source.add_argument(
         "--ssh",
         metavar="HOST",
         default=os.environ.get("FINDPIC_BOT_HOST"),
-        help="pull it from this server's Docker volume (env: FINDPIC_BOT_HOST)",
+        help="the same, on another machine, over ssh (env: FINDPIC_BOT_HOST)",
     )
     source.add_argument("--volume", default=DEFAULT_VOLUME, help="Docker volume holding the data")
     source.add_argument("--image", default=DEFAULT_IMAGE, help="image used to read the volume")
@@ -728,10 +735,19 @@ def main(argv: list[str] | None = None) -> int:
 
     with tempfile.TemporaryDirectory(prefix="findpic-stats-") as scratch:
         workspace = Path(scratch)
-        if args.ssh:
-            live = pull(args.ssh, args.volume, args.image, workspace)
+        command = volume_command(args.volume, args.image)
+        if args.docker:
+            source = f"docker volume {args.volume}"
+            database = pull(command, workspace, source, args.volume)
+        elif args.ssh:
             source = f"{args.ssh}:{args.volume}"
-            database = live
+            # ssh joins its arguments with spaces and hands the result to the
+            # remote login shell, so the quoting has to survive that trip —
+            # otherwise the `sh -c` payload comes apart and half of it runs on
+            # the host instead of inside the container.
+            database = pull(
+                ["ssh", args.ssh, shlex.join(command)], workspace, source, args.volume
+            )
         else:
             live = args.db or find_database()
             source = str(live)

@@ -291,12 +291,14 @@ it parses files that arrive from strangers.
 ### Who is using it
 
 `scripts/bot-stats.py` reads the bot's own database and says who has been
-talking to it. Standard library only, so it runs on the server as-is; it can
-also pull the database out of the Docker volume over ssh, and it always works on
-a copy, never the file the bot is writing to.
+talking to it. Standard library only — no venv, no install, nothing to add to
+the server. It reads the database out of the Docker volume through a throwaway
+container, locally or over ssh, so it needs the docker group rather than root,
+and it always works on a copy rather than the file the bot is writing to.
 
 ```bash
-scripts/bot-stats.py --ssh you@your.server           # last 30 days
+scripts/bot-stats.py --docker                        # on the server itself
+scripts/bot-stats.py --ssh you@your.server           # from your laptop
 scripts/bot-stats.py --ssh you@your.server --all     # everything kept
 scripts/bot-stats.py --db bot.sqlite3 --json         # machine-readable
 scripts/bot-stats.py --db bot.sqlite3 --user 1234567 # one account
