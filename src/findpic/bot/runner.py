@@ -23,7 +23,7 @@ from ..exif import ExifTool, ExifToolMissing
 from ..i18n import FALLBACK_LANGUAGE, Translator, available_languages
 from .config import Config, ConfigError
 from .handlers import media_router, router
-from .middlewares import AccessMiddleware, LanguageMiddleware, ThrottleMiddleware
+from .middlewares import AccessMiddleware, AuditMiddleware, LanguageMiddleware, ThrottleMiddleware
 from .service import AnalysisService
 from .storage import Storage
 
@@ -114,8 +114,11 @@ async def cleanup_loop(storage: Storage, config: Config) -> None:
             await asyncio.sleep(CLEANUP_INTERVAL)
             removed = await storage.purge_expired(time.time() - config.analysis_ttl_seconds)
             await storage.purge_old_usage()
+            forgotten = await storage.purge_old_events(config.analytics_retention_days)
             if removed:
                 logger.info("purged %s expired analysis handles", removed)
+            if forgotten:
+                logger.info("forgot %s usage records past the retention window", forgotten)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
@@ -150,12 +153,16 @@ async def run(config: Config) -> None:
         service=AnalysisService(config, exiftool),
     )
 
-    # Order matters: language first so every later middleware can phrase its
-    # refusal in the user's own language.
+    # Order matters. Language first, so every later middleware can phrase its
+    # refusal in the user's own language. Audit second, before the allowlist, so
+    # that a request from somebody who is turned away is still counted.
     language = LanguageMiddleware(storage, config)
-    access = AccessMiddleware(config)
+    audit = AuditMiddleware(storage, config)
+    access = AccessMiddleware(config, storage)
     dispatcher.message.middleware(language)
     dispatcher.callback_query.middleware(language)
+    dispatcher.message.middleware(audit)
+    dispatcher.callback_query.middleware(audit)
     dispatcher.message.middleware(access)
     dispatcher.callback_query.middleware(access)
     # Only the media router is metered, so commands and button taps stay free.

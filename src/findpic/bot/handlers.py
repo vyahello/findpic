@@ -103,11 +103,30 @@ async def show_language(message: Message, t: Translator, language: str) -> None:
     await message.answer(t.get("bot.language.prompt"), reply_markup=language_keyboard(language))
 
 
+def privacy_notice(t: Translator, config: Config) -> str:
+    """The privacy text, assembled to match how the bot is actually configured.
+
+    Composed rather than written out once because the bot does keep a usage
+    record, and an operator can turn it off. A notice that describes the other
+    build is worse than no notice: this is the one screen where a user decides
+    whether to trust the thing, and it is the whole argument of the project that
+    a claim about your data should be checkable.
+    """
+    if not config.analytics:
+        extra = t.get("bot.privacy.no_analytics")
+    else:
+        days = config.analytics_retention_days
+        retention = (
+            t.get("bot.privacy.retention", days)
+            if days > 0
+            else t.get("bot.privacy.retention.forever")
+        )
+        extra = f"{t.get('bot.privacy.analytics')} {retention}\n{t.get('bot.privacy.never')}"
+    return t.get("bot.privacy", ttl_hours=config.analysis_ttl_seconds // 3600, extra=extra)
+
+
 async def show_privacy(message: Message, t: Translator, config: Config) -> None:
-    await message.answer(
-        t.get("bot.privacy", ttl_hours=config.analysis_ttl_seconds // 3600),
-        disable_web_page_preview=True,
-    )
+    await message.answer(privacy_notice(t, config), disable_web_page_preview=True)
 
 
 async def show_about(message: Message, t: Translator) -> None:
@@ -228,6 +247,7 @@ async def handle_compressed_photo(
     config: Config,
     storage: Storage,
     service: AnalysisService,
+    event_id: int | None = None,
     **_: object,
 ) -> None:
     """A picture sent the ordinary way — Telegram already stripped it."""
@@ -243,6 +263,7 @@ async def handle_compressed_photo(
         file_name=f"telegram_photo_{photo.file_unique_id}.jpg",
         file_size=photo.file_size or 0,
         compressed=True,
+        event_id=event_id,
     )
 
 
@@ -254,11 +275,13 @@ async def handle_document(
     config: Config,
     storage: Storage,
     service: AnalysisService,
+    event_id: int | None = None,
     **_: object,
 ) -> None:
     """A picture sent as a file — the original bytes, which is what we want."""
     document = message.document
     if not _looks_like_image(document.file_name, document.mime_type):
+        await storage.note_outcome(event_id, "not_an_image")
         await message.answer(t.get("bot.error.not_an_image"))
         return
     await _analyse_and_reply(
@@ -272,6 +295,7 @@ async def handle_document(
         file_name=document.file_name or f"file_{document.file_unique_id}",
         file_size=document.file_size or 0,
         compressed=False,
+        event_id=event_id,
     )
 
 
@@ -298,8 +322,10 @@ async def _analyse_and_reply(
     file_name: str,
     file_size: int,
     compressed: bool,
+    event_id: int | None = None,
 ) -> None:
     if file_size and file_size > config.max_file_bytes:
+        await storage.note_outcome(event_id, "too_big")
         await message.answer(t.get("bot.error.too_big", limit=t.bytes(config.max_file_bytes)))
         return
 
@@ -311,12 +337,16 @@ async def _analyse_and_reply(
         )
     except ExifToolError as error:
         logger.warning("analysis failed for %s: %s", file_name, error)
+        await storage.note_outcome(event_id, "unreadable")
         await message.answer(t.get("bot.error.unreadable"))
         return
     except Exception:  # noqa: BLE001 - one bad file must not kill the bot
         logger.exception("unexpected failure analysing %s", file_name)
+        await storage.note_outcome(event_id, "failed")
         await message.answer(t.get("bot.error.internal"))
         return
+
+    await _note_equipment(storage, event_id, report, compressed=compressed)
 
     token = await storage.remember_analysis(
         user_id=message.from_user.id,
@@ -342,6 +372,31 @@ async def _analyse_and_reply(
             offer_backup=_worth_cleaning(report) and not compressed,
         ),
         disable_web_page_preview=True,
+    )
+
+
+async def _note_equipment(
+    storage: Storage, event_id: int | None, report: Report, *, compressed: bool
+) -> None:
+    """Record which camera the photo named, for the operator's own statistics.
+
+    Telegram tells a bot nothing about the device on the other end — no model,
+    no operating system, no app version. The picture does, when it still has its
+    tags, and that is the only honest source for "what do my users shoot with".
+
+    Only the equipment is kept: make, model, OS version, and whether the file
+    arrived compressed or whole. When and where it was taken are not recorded,
+    here or anywhere else.
+    """
+    device = report.device
+    await storage.note_analysis(
+        event_id,
+        make=device.make,
+        model=device.model,
+        os_version=device.os,
+        sent_as="photo" if compressed else "file",
+        file_type=report.file.file_type,
+        stripped=not (device.make or device.model) and not report.capture.taken,
     )
 
 

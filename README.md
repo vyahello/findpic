@@ -269,6 +269,7 @@ Under it sit the buttons that do something with the answer:
 |---|---|
 | 🧹 **Send me a clean copy** | The same picture back with the identifying metadata stripped, orientation and colour kept so it still displays correctly. Shown only when there is something worth removing. |
 | 🔍 **Show every raw tag** | Every tag exiftool found, as a text file — including the ones the report deliberately leaves out. |
+| 💾 **Backup the metadata** | An `.mie` sidecar holding everything, binary MakerNotes included, so a strip can be undone. Offered wherever the clean copy is, because losing the only record of where a photo was taken is not a thing to find out afterwards. |
 | 🌐 **Language** | English ⇄ Ukrainian, remembered per user. |
 
 A persistent keyboard under the message box carries 📖 **How to use**,
@@ -286,6 +287,62 @@ catalogue, so they live in git rather than in @BotFather.
 Deployment is a container carrying its own pinned exiftool, deployed to a VPS by
 GitHub Actions after CI goes green. It runs unprivileged and read-only, because
 it parses files that arrive from strangers.
+
+### Who is using it
+
+`scripts/bot-stats.py` reads the bot's own database and says who has been
+talking to it. Standard library only, so it runs on the server as-is; it can
+also pull the database out of the Docker volume over ssh, and it always works on
+a copy, never the file the bot is writing to.
+
+```bash
+scripts/bot-stats.py --ssh you@your.server           # last 30 days
+scripts/bot-stats.py --ssh you@your.server --all     # everything kept
+scripts/bot-stats.py --db bot.sqlite3 --json         # machine-readable
+scripts/bot-stats.py --db bot.sqlite3 --user 1234567 # one account
+```
+
+```
+  14 accounts known · 9 active in this window · 3 new · 6 returning
+  412 interactions · 168 pictures sent · 151 analysed · 80 arrived with no camera in them
+
+WHO
+  id          name              username         lang  first seen  last seen    events  photos
+  5829771410  Volodymyr         @vyahello        uk    2026-06-02  2026-08-17      210      98 ★
+  792620422   Оля               —                uk    2026-07-14  2026-08-16       44      19
+
+WHERE  (Telegram gives a bot no location at all)
+  client language   uk 9 · en 4 · pl 1
+  waking hours      UTC+2 8 · UTC+0 1 · unknown 5   guessed from when each person writes, ±1–2h
+
+DEVICES  (read out of the photos, not from Telegram)
+  Apple iPhone 13 Pro                   41  17.4.1 (30), 17.3 (11)
+  Google Pixel 7                        18  Android 14 (18)
+  (no camera in the file)               80  stripped before it reached the bot
+```
+
+**What a bot cannot know, and this does not pretend to.** The Telegram Bot API
+hands over an *account* — id, name, username, the language the client asks in,
+the premium flag — and the moment each message arrived. There is no device in
+it, no operating system, no app version, no IP address and no location. Those
+exist only in Telegram's own "Devices" screen, for your own account.
+
+So the two columns everybody asks for first come from somewhere else, and the
+report labels them:
+
+- **Devices and OS** are read out of the photographs, by findpic. That is a
+  claim about the camera, not about the phone holding the Telegram session, and
+  it is blank for everyone whose photos arrived already stripped — which, for a
+  bot about metadata, is most of them.
+- **Where** has two weak proxies: the client language, and the hours somebody is
+  active, which places their waking day on the clock. Neither is a location.
+
+Recording is on by default and the bot's `/privacy` screen states exactly what
+it keeps and for how long, in both languages. `ANALYTICS=0` turns it off,
+`ANALYTICS_RETENTION_DAYS` sets the window. What is **never** written down:
+anything a user types, the name of any file they send, or where and when a photo
+was taken. Those are precisely what this bot warns people about, and collecting
+them would make the warning worthless.
 
 ## When the metadata is gone
 
@@ -496,8 +553,14 @@ src/findpic/
     handlers.py    commands, buttons, media routing
     format.py      the report as a Telegram message
     keyboards.py   reply and inline keyboards, callback factories
+    middlewares.py language, usage record, allowlist, rate limit
     service.py     download → analyse → delete
     setup.py       publishes name, descriptions, menu and avatar
+    storage.py     language, quota, button handles, who used the bot
+scripts/
+  bot-stats.py     who used the bot — stdlib only, runs anywhere
+  make-demo.py     rebuilds the sample photo in this README
+  rotate-token.sh  replaces the bot token everywhere it is stored
 ```
 
 ## Licence

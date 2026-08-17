@@ -8,9 +8,20 @@ markup on its way into a message.
 
 from __future__ import annotations
 
+import datetime as dt
+import functools
 from pathlib import Path
 
 import pytest
+from aiogram.types import (
+    CallbackQuery,
+    Chat,
+    Document,
+    Message,
+    PhotoSize,
+    TelegramObject,
+    User,
+)
 
 from findpic.analysis import AnalysisOptions, analyze
 from findpic.bot.config import CLOUD_DOWNLOAD_LIMIT, Config, ConfigError
@@ -20,8 +31,12 @@ from findpic.bot.format import (
     render_report,
     render_tag_dump,
 )
-from findpic.bot.storage import Storage
+from findpic.bot.handlers import privacy_notice
+from findpic.bot.keyboards import menu_labels
+from findpic.bot.middlewares import AccessMiddleware, AuditMiddleware, classify
+from findpic.bot.storage import Person, Storage
 from findpic.exif import ExifTool
+from findpic.i18n import Translator, available_languages
 
 TOKEN = "1234567890:AAHc0000000000000000000000000000000"
 
@@ -199,6 +214,233 @@ async def test_expired_handles_are_purged(storage: Storage) -> None:
     await storage.remember_analysis(1, "new", "new.jpg", now=9000.0)
     assert await storage.purge_expired(older_than=5000.0) == 1
     assert await storage.known_users() == 0
+
+
+# -------------------------------------------------------------------- audit
+
+
+async def rows(storage: Storage, sql: str) -> list[dict]:
+    async with storage.db.execute(sql) as cursor:
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def test_an_interaction_is_recorded_once(storage: Storage) -> None:
+    person = Person(7, "someone", "Some", "One", "uk", is_premium=True)
+    first = await storage.record_event(person, kind="photo", chat_type="private")
+    await storage.record_event(person, kind="command", action="help")
+
+    people = await rows(storage, "SELECT * FROM people")
+    assert len(people) == 1
+    assert people[0]["username"] == "someone"
+    assert people[0]["language_code"] == "uk"
+    assert people[0]["is_premium"] == 1
+    assert people[0]["events"] == 2
+    assert people[0]["first_seen"] <= people[0]["last_seen"]
+
+    events = await rows(storage, "SELECT * FROM events ORDER BY id")
+    assert [event["kind"] for event in events] == ["photo", "command"]
+    assert events[0]["id"] == first
+    assert events[0]["outcome"] is None
+
+
+async def test_a_renamed_account_keeps_its_first_seen(storage: Storage) -> None:
+    """Usernames change; the day somebody first showed up does not."""
+    await storage.record_event(Person(7, "before"), kind="command", action="start")
+    original = (await rows(storage, "SELECT * FROM people"))[0]["first_seen"]
+    await storage.record_event(Person(7, "after"), kind="command", action="help")
+    updated = (await rows(storage, "SELECT * FROM people"))[0]
+    assert updated["username"] == "after"
+    assert updated["first_seen"] == original
+
+
+async def test_what_a_photo_declared_is_attached_to_its_event(storage: Storage) -> None:
+    event_id = await storage.record_event(Person(7), kind="file")
+    await storage.note_analysis(
+        event_id,
+        make="Apple",
+        model="iPhone 13 Pro",
+        os_version="17.4.1",
+        sent_as="file",
+        file_type="JPEG",
+        stripped=False,
+    )
+    event = (await rows(storage, "SELECT * FROM events"))[0]
+    assert (event["make"], event["model"], event["os"]) == ("Apple", "iPhone 13 Pro", "17.4.1")
+    assert event["sent_as"] == "file"
+
+
+async def test_a_refusal_is_recorded_against_the_same_row(storage: Storage) -> None:
+    event_id = await storage.record_event(Person(7), kind="photo")
+    await storage.note_outcome(event_id, "quota")
+    events = await rows(storage, "SELECT * FROM events")
+    assert len(events) == 1, "a refusal must annotate the interaction, not add one"
+    assert events[0]["outcome"] == "quota"
+
+
+async def test_recording_survives_a_missing_event(storage: Storage) -> None:
+    """With analytics off there is no row id, and the handlers still call these."""
+    await storage.note_outcome(None, "quota")
+    await storage.note_analysis(
+        None, make="x", model="y", os_version=None, sent_as="file", file_type=None, stripped=True
+    )
+    assert await rows(storage, "SELECT * FROM events") == []
+
+
+async def test_old_records_are_forgotten(storage: Storage) -> None:
+    """Including the account itself, or the promise in /privacy is not kept.
+
+    A roster of names and first-seen dates, with everything those people did
+    already deleted, is still a record of who used the bot.
+    """
+    await storage.record_event(Person(7, "gone"), kind="photo")
+    await storage.db.execute("UPDATE events SET at = '2020-01-01T00:00:00+00:00'")
+    await storage.db.commit()
+    assert await storage.purge_old_events(keep_days=30) == 1
+    assert await rows(storage, "SELECT * FROM events") == []
+    assert await rows(storage, "SELECT * FROM people") == []
+
+
+async def test_forgetting_the_quiet_keeps_the_active(storage: Storage) -> None:
+    await storage.record_event(Person(7, "quiet"), kind="photo")
+    await storage.db.execute("UPDATE events SET at = '2020-01-01T00:00:00+00:00'")
+    await storage.record_event(Person(8, "here"), kind="photo")
+    await storage.db.commit()
+
+    assert await storage.purge_old_events(keep_days=30) == 1
+    assert [person["username"] for person in await rows(storage, "SELECT * FROM people")] == [
+        "here"
+    ]
+
+
+async def test_zero_retention_keeps_everything(storage: Storage) -> None:
+    """0 means forever. Reading it as "keep nothing" would silently delete."""
+    await storage.record_event(Person(7), kind="photo")
+    await storage.db.execute("UPDATE events SET at = '2020-01-01T00:00:00+00:00'")
+    await storage.db.commit()
+    assert await storage.purge_old_events(keep_days=0) == 0
+    assert len(await rows(storage, "SELECT * FROM events")) == 1
+    assert len(await rows(storage, "SELECT * FROM people")) == 1
+
+
+# ------------------------------------------------------------- the middleware
+
+
+async def through(middlewares, event, data: dict) -> dict:
+    """Run an event down a chain of middlewares into a handler that just marks."""
+
+    async def arrived(_event, context: dict) -> None:
+        context["reached"] = True
+
+    handler = arrived
+    for middleware in reversed(middlewares):
+        handler = functools.partial(middleware, handler)
+    await handler(event, data)
+    return data
+
+
+async def test_using_the_bot_is_recorded_without_being_asked(storage: Storage) -> None:
+    config = Config(token=TOKEN)
+    data = {"event_from_user": User(id=7, is_bot=False, first_name="A", username="a")}
+    data = await through([AuditMiddleware(storage, config)], message(text="/help"), data)
+
+    assert data["reached"]
+    assert data["event_id"]
+    event = (await rows(storage, "SELECT * FROM events"))[0]
+    assert (event["kind"], event["action"]) == ("command", "help")
+
+
+async def test_somebody_turned_away_is_still_counted(storage: Storage) -> None:
+    """Who knocked is half of what an operator wants out of this table.
+
+    Which is why the audit runs before the allowlist rather than after it.
+    """
+    config = Config(token=TOKEN, allowed_user_ids=frozenset({1}))
+    data = {
+        "event_from_user": User(id=999, is_bot=False, first_name="Nobody"),
+        "t": Translator("en"),
+    }
+    data = await through(
+        [AuditMiddleware(storage, config), AccessMiddleware(config, storage)],
+        TelegramObject(),
+        data,
+    )
+
+    assert "reached" not in data, "the allowlist should have stopped this"
+    event = (await rows(storage, "SELECT * FROM events"))[0]
+    assert event["outcome"] == "blocked"
+
+
+async def test_nothing_is_recorded_when_recording_is_off(storage: Storage) -> None:
+    config = Config(token=TOKEN, analytics=False)
+    data = await through(
+        [AuditMiddleware(storage, config)],
+        message(text="/help"),
+        {"event_from_user": User(id=7, is_bot=False, first_name="A")},
+    )
+    assert data["reached"], "turning off the statistics must not turn off the bot"
+    assert "event_id" not in data
+    assert await rows(storage, "SELECT * FROM events") == []
+    assert await rows(storage, "SELECT * FROM people") == []
+
+
+async def test_a_broken_database_does_not_break_the_bot(storage: Storage) -> None:
+    """A statistic is never worth a failed request."""
+    await storage.db.execute("DROP TABLE events")
+    await storage.db.commit()
+    data = await through(
+        [AuditMiddleware(storage, Config(token=TOKEN))],
+        message(text="/help"),
+        {"event_from_user": User(id=7, is_bot=False, first_name="A")},
+    )
+    assert data["reached"]
+
+
+# --------------------------------------------------------------- classifying
+
+
+def message(**fields) -> Message:
+    return Message(
+        message_id=1,
+        date=dt.datetime(2026, 8, 18, tzinfo=dt.timezone.utc),
+        chat=Chat(id=1, type="private"),
+        **fields,
+    )
+
+
+def test_classify_names_the_command_not_its_arguments() -> None:
+    assert classify(message(text="/lang uk"), {}) == ("command", "lang")
+    assert classify(message(text="/help@findpicbot"), {}) == ("command", "help")
+
+
+def test_classify_never_records_what_somebody_typed() -> None:
+    """The one thing this table must not learn."""
+    kind, action = classify(message(text="my address is 12 Foo Street"), {})
+    assert kind == "text"
+    assert action is None
+
+
+def test_classify_separates_a_compressed_photo_from_a_file() -> None:
+    photo = [PhotoSize(file_id="a", file_unique_id="b", width=90, height=90)]
+    assert classify(message(photo=photo), {}) == ("photo", None)
+    document = Document(file_id="a", file_unique_id="b", file_name="IMG_0001.HEIC")
+    assert classify(message(document=document), {}) == ("file", ".heic")
+
+
+def test_classify_maps_a_menu_caption_to_its_action() -> None:
+    labels = menu_labels()
+    caption = next(iter(labels))
+    assert classify(message(text=caption), labels) == ("menu", labels[caption])
+
+
+def test_classify_keeps_the_analysis_token_out_of_the_record() -> None:
+    """The token is a capability. It has no business in a statistics table."""
+    query = CallbackQuery(
+        id="1",
+        from_user=User(id=7, is_bot=False, first_name="A"),
+        chat_instance="x",
+        data="an:clean:s3cr3t-token",
+    )
+    assert classify(query, {}) == ("button", "clean")
 
 
 # ---------------------------------------------------------------- rendering
@@ -526,3 +768,65 @@ def test_an_intact_photo_gets_no_traces_section(camera_jpeg: Path) -> None:
 
     body = render_report(report_for(camera_jpeg))
     assert Translator("en").get("bot.section.traces") not in body
+
+
+# ---------------------------------------------------------- the privacy notice
+
+
+TOKEN_CONFIG = {"token": TOKEN}
+
+
+@pytest.mark.parametrize("language", available_languages())
+def test_the_privacy_notice_admits_the_usage_record(language: str) -> None:
+    """The bot keeps a record of who used it, so the notice has to say so.
+
+    This is the screen where somebody decides whether to trust the thing, and
+    the whole argument of the project is that a claim about your data should be
+    checkable. A notice describing a build that keeps nothing, running on a
+    build that keeps something, is the exact failure findpic exists to expose.
+    """
+    t = Translator(language)
+    notice = privacy_notice(t, Config(**TOKEN_CONFIG, analytics=True))
+    assert t.get("bot.privacy.analytics") in notice
+    assert t.get("bot.privacy.never") in notice
+    assert "90" in notice, "the retention window has to be stated, not implied"
+    assert t.get("bot.privacy.no_analytics") not in notice
+
+
+@pytest.mark.parametrize("language", available_languages())
+def test_the_notice_drops_the_claim_when_recording_is_off(language: str) -> None:
+    t = Translator(language)
+    notice = privacy_notice(t, Config(**TOKEN_CONFIG, analytics=False))
+    assert t.get("bot.privacy.no_analytics") in notice
+    assert t.get("bot.privacy.analytics") not in notice
+
+
+@pytest.mark.parametrize("language", available_languages())
+def test_the_notice_is_never_left_with_an_unfilled_placeholder(language: str) -> None:
+    """Translator.get swallows a formatting error and returns the raw template."""
+    t = Translator(language)
+    for config in (
+        Config(**TOKEN_CONFIG),
+        Config(**TOKEN_CONFIG, analytics=False),
+        Config(**TOKEN_CONFIG, analytics_retention_days=0),
+        Config(**TOKEN_CONFIG, analytics_retention_days=1),
+    ):
+        notice = privacy_notice(t, config)
+        assert "{" not in notice and "}" not in notice
+        assert len(notice) < MESSAGE_LIMIT
+
+
+def test_forever_is_stated_rather_than_printed_as_zero_days() -> None:
+    notice = privacy_notice(Translator("en"), Config(**TOKEN_CONFIG, analytics_retention_days=0))
+    assert Translator("en").get("bot.privacy.retention.forever") in notice
+    assert "0 days" not in notice
+
+
+def test_analytics_settings_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ANALYTICS", "0")
+    monkeypatch.setenv("ANALYTICS_RETENTION_DAYS", "7")
+    config = Config.from_env(use_env_file=False)
+    assert config.analytics is False
+    assert config.analytics_retention_days == 7
+    assert "analytics=off" in config.describe()

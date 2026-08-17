@@ -1,9 +1,20 @@
-"""Persistent state: language preference, usage quota, and analysis handles.
+"""Persistent state: language preference, usage quota, analysis handles, and
+a record of who used the bot.
 
 SQLite, because the bot must remember a user's language across restarts and a
 JSON file would corrupt under concurrent writes. Everything here is small and
 bounded — no photo ever touches the database, only a Telegram ``file_id``, which
 is a reference Telegram already holds.
+
+The audit tables (``people`` and ``events``) answer the operator's question
+"who is using this?". Two limits are deliberate and worth stating, because the
+bot's own privacy notice has to be true:
+
+* No message text is ever stored. An event records *that* somebody typed, never
+  what. Likewise no filename, no ``file_id``, no coordinates, no hashes.
+* Nothing is kept about the *picture* beyond the camera it names — make, model
+  and OS version. Where and when a photo was taken is the thing this bot warns
+  people about; harvesting it from their uploads would be indefensible.
 """
 
 from __future__ import annotations
@@ -43,11 +54,56 @@ CREATE TABLE IF NOT EXISTS analyses (
 );
 
 CREATE INDEX IF NOT EXISTS analyses_created_at ON analyses (created_at);
+
+-- Everyone the bot has met, one row each, updated in place. Separate from
+-- `users` on purpose: that table is a preference the user set and expects to
+-- keep, this one is operator analytics that can be purged without losing it.
+CREATE TABLE IF NOT EXISTS people (
+    user_id       INTEGER PRIMARY KEY,
+    username      TEXT,
+    first_name    TEXT,
+    last_name     TEXT,
+    -- The language their Telegram client asks in, which is not necessarily the
+    -- one they chose in the menu. Both are interesting; they often disagree.
+    language_code TEXT,
+    is_premium    INTEGER NOT NULL DEFAULT 0,
+    is_bot        INTEGER NOT NULL DEFAULT 0,
+    first_seen    TEXT    NOT NULL,
+    last_seen     TEXT    NOT NULL,
+    events        INTEGER NOT NULL DEFAULT 0
+);
+
+-- One row per interaction. Deliberately narrow: no text, no filenames, no
+-- file_ids, nothing that identifies a picture.
+CREATE TABLE IF NOT EXISTS events (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id   INTEGER NOT NULL,
+    at        TEXT    NOT NULL,  -- UTC, ISO-8601
+    kind      TEXT    NOT NULL,  -- command | menu | button | photo | file | text | media
+    action    TEXT,              -- which command, which button; never message text
+    chat_type TEXT,
+    -- NULL means it was served. Anything else is why it was not.
+    outcome   TEXT,
+    -- Filled in after an analysis, from what the photo itself declared.
+    make      TEXT,
+    model     TEXT,
+    os        TEXT,
+    sent_as   TEXT,              -- photo (Telegram re-encoded it) | file (original)
+    file_type TEXT,
+    stripped  INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS events_at ON events (at);
+CREATE INDEX IF NOT EXISTS events_user ON events (user_id, at);
 """
 
 
 def _today() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+
+
+def _now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
 @dataclass(frozen=True)
@@ -67,6 +123,25 @@ class AnalysisHandle:
     user_id: int
     file_id: str
     file_name: str | None
+
+
+@dataclass(frozen=True)
+class Person:
+    """What Telegram tells a bot about whoever is talking to it.
+
+    This is the whole list — there is no device, no operating system, no app
+    version, no IP and no location in it. Bots see an account, not a session.
+    Anything this project reports about a device is read out of the photograph,
+    which is a different claim and is labelled as one.
+    """
+
+    user_id: int
+    username: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    language_code: str | None = None
+    is_premium: bool = False
+    is_bot: bool = False
 
 
 class Storage:
@@ -213,3 +288,115 @@ class Storage:
         cursor = await self.db.execute("DELETE FROM usage WHERE day < ?", (cutoff,))
         await self.db.commit()
         return cursor.rowcount or 0
+
+    # ----------------------------------------------------------------- audit
+
+    async def record_event(
+        self,
+        person: Person,
+        *,
+        kind: str,
+        action: str | None = None,
+        chat_type: str | None = None,
+    ) -> int:
+        """Note one interaction and return its row id.
+
+        The id is handed to the handler so it can fill in what the analysis
+        found. One row per interaction, updated in place — a second row would
+        double every count in the report.
+        """
+        now = _now()
+        await self.db.execute(
+            """
+            INSERT INTO people (user_id, username, first_name, last_name,
+                                language_code, is_premium, is_bot,
+                                first_seen, last_seen, events)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username      = excluded.username,
+                first_name    = excluded.first_name,
+                last_name     = excluded.last_name,
+                language_code = excluded.language_code,
+                is_premium    = excluded.is_premium,
+                last_seen     = excluded.last_seen,
+                events        = events + 1
+            """,
+            (
+                person.user_id,
+                person.username,
+                person.first_name,
+                person.last_name,
+                person.language_code,
+                int(person.is_premium),
+                int(person.is_bot),
+                now,
+                now,
+            ),
+        )
+        cursor = await self.db.execute(
+            "INSERT INTO events (user_id, at, kind, action, chat_type) VALUES (?, ?, ?, ?, ?)",
+            (person.user_id, now, kind, action, chat_type),
+        )
+        await self.db.commit()
+        return int(cursor.lastrowid or 0)
+
+    async def note_outcome(self, event_id: int | None, outcome: str) -> None:
+        """Record why an interaction was not served: refused, or it failed."""
+        if not event_id:
+            return
+        await self.db.execute("UPDATE events SET outcome = ? WHERE id = ?", (outcome, event_id))
+        await self.db.commit()
+
+    async def note_analysis(
+        self,
+        event_id: int | None,
+        *,
+        make: str | None,
+        model: str | None,
+        os_version: str | None,
+        sent_as: str,
+        file_type: str | None,
+        stripped: bool,
+    ) -> None:
+        """Attach what the photo declared about the camera that made it.
+
+        Make, model and OS version only. Not when it was taken, not where, not
+        a hash — those describe the person's life rather than their equipment,
+        and the operator did not need them to answer "what devices do my users
+        have".
+        """
+        if not event_id:
+            return
+        await self.db.execute(
+            "UPDATE events SET make = ?, model = ?, os = ?, sent_as = ?,"
+            " file_type = ?, stripped = ? WHERE id = ?",
+            (make, model, os_version, sent_as, file_type, int(stripped), event_id),
+        )
+        await self.db.commit()
+
+    async def purge_old_events(self, keep_days: int) -> int:
+        """Forget interactions older than the retention window.
+
+        The account row goes with the last of its interactions. Keeping a name,
+        a username and a first-seen date after deleting everything the person
+        did would leave the bot holding a roster of strangers it had promised to
+        forget — and the notice it shows them says the record is deleted, so it
+        has to be. Anyone still active keeps their row, because they still have
+        events; only somebody who has been quiet for the whole window is dropped.
+
+        ``keep_days <= 0`` keeps everything indefinitely, which is a decision the
+        operator has to make deliberately in the configuration.
+        """
+        if keep_days <= 0:
+            return 0
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=keep_days)).isoformat(
+            timespec="seconds"
+        )
+        cursor = await self.db.execute("DELETE FROM events WHERE at < ?", (cutoff,))
+        removed = cursor.rowcount or 0
+        if removed:
+            await self.db.execute(
+                "DELETE FROM people WHERE user_id NOT IN (SELECT DISTINCT user_id FROM events)"
+            )
+        await self.db.commit()
+        return removed

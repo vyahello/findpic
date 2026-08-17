@@ -123,6 +123,14 @@ class Config:
     #: Analyses are remembered only long enough to serve the buttons under them.
     analysis_ttl_seconds: int = 24 * 3600
 
+    #: Record who used the bot: account, what they asked for, when, and what
+    #: camera their photos named. Never message text, never a location. Set
+    #: ANALYTICS=0 and the bot writes nothing but the language preference.
+    analytics: bool = True
+    #: How long that record is kept. 0 keeps it forever, which is a decision
+    #: rather than a default.
+    analytics_retention_days: int = 90
+
     database_path: Path = Path("/data/findpic-bot.sqlite3")
     work_dir: Path = Path("/tmp/findpic")
     #: Delete the source file from the shared volume once analysed. Only ever
@@ -180,6 +188,8 @@ class Config:
             max_file_bytes=max_bytes,
             throttle_seconds=float(os.environ.get("THROTTLE_SECONDS", "3") or 3),
             daily_quota=_env_int("DAILY_QUOTA", 50),
+            analytics=_env_bool("ANALYTICS", True),
+            analytics_retention_days=_env_int("ANALYTICS_RETENTION_DAYS", 90),
             database_path=Path(os.environ.get("DATABASE_PATH", "/data/findpic-bot.sqlite3")),
             work_dir=Path(os.environ.get("WORK_DIR", "/tmp/findpic")),
             delete_source_files=_env_bool("DELETE_SOURCE_FILES", True),
@@ -197,8 +207,15 @@ class Config:
         endpoint = self.api_base or "api.telegram.org"
         mode = "local" if self.api_is_local else "cloud"
         access = "public" if self.is_public else f"{len(self.allowed_user_ids)} allowed users"
+        if not self.analytics:
+            stats = "off"
+        elif self.analytics_retention_days > 0:
+            stats = f"{self.analytics_retention_days}d"
+        else:
+            stats = "kept forever"
         return (
             f"uid={os.getuid()} · endpoint={endpoint} ({mode}) · access={access} · "
             f"max_file={self.max_file_bytes // 1024 // 1024}MB · "
-            f"quota={self.daily_quota}/day · throttle={self.throttle_seconds}s"
+            f"quota={self.daily_quota}/day · throttle={self.throttle_seconds}s · "
+            f"analytics={stats}"
         )
