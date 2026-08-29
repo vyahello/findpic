@@ -323,6 +323,47 @@ DEVICES  (read out of the photos, not from Telegram)
   (no camera in the file)               80  stripped before it reached the bot
 ```
 
+### Keeping the photos
+
+A bot that reads photographs is more interesting to its operator if they can see
+what it is being used on. `ARCHIVE_DIR` turns that on; empty — the default —
+keeps nothing, because this is a decision about other people's pictures rather
+than a setting.
+
+```
+archive/
+  objects/3f/9a/3f9a2c1b….heic                                   the bytes, one copy
+  by-date/2026-08-29/20260829T134501Z-u7332288724-3f9a2c1b.heic  a hardlink
+```
+
+A bind mount rather than a named volume, and that is the point: a named volume
+lives under `/var/lib/docker` as `root:root 0700`, so looking at a single JPEG
+would need `sudo` or a throwaway container. This is `ls`-able and `scp`-able
+with neither. `by-date/` is what you browse — one directory per day, names that
+sort chronologically and carry the moment, the sender and the first eight hex of
+the digest, so `grep 3f9a2c1b` joins a file on disk to a row in the ledger to a
+line in the report. The same picture sent twice is two entries and one copy of
+the bytes.
+
+**No byte of what the sender called their file ever enters a path.** Every name
+is built from a timestamp, an integer user id, a hex digest and an allowlisted
+extension, so traversal, NUL bytes, right-to-left overrides and 4 kB names are
+impossible rather than defended against. The extension comes from the file's own
+first bytes, not from the claim — a file that crashes exiftool is exactly the one
+worth having on disk.
+
+Caps on total bytes, per person, per file and free space remaining; oldest
+evicted first; a retention window clamped to the analytics one, because past
+that the sender's name is deleted and a photograph nobody can attribute is worse
+than no photograph. Nothing in the archive can fail an analysis: every outcome,
+including the refusals, is a row with a state, since an archive whose failures
+are invisible is worse than none.
+
+**Turning it on rewrites `/privacy`, in both languages**, and adds `/forget` —
+which deletes every picture that person sent and everything recorded about them.
+The bot currently tells users "nothing is archived"; that sentence and the code
+that makes it false cannot ship in either order.
+
 **What a bot cannot know, and this does not pretend to.** The Telegram Bot API
 hands over an *account* — id, name, username, the language the client asks in,
 the premium flag — and the moment each message arrived. There is no device in
@@ -340,11 +381,11 @@ report labels them:
   active, which places their waking day on the clock. Neither is a location.
 
 Recording is on by default and the bot's `/privacy` screen states exactly what
-it keeps and for how long, in both languages. `ANALYTICS=0` turns it off,
-`ANALYTICS_RETENTION_DAYS` sets the window. What is **never** written down:
-anything a user types, the name of any file they send, or where and when a photo
-was taken. Those are precisely what this bot warns people about, and collecting
-them would make the warning worthless.
+it keeps and for how long, in both languages, changing automatically with the
+configuration — that screen is where somebody decides whether to trust the
+thing, and a notice describing a different build is worse than no notice.
+`ANALYTICS=0` turns it off, `ANALYTICS_RETENTION_DAYS` sets the window.
+Message text is never recorded under any setting.
 
 ## When the metadata is gone
 
@@ -552,6 +593,8 @@ src/findpic/
   render/
     terminal.py    the rich report
   bot/
+    archive.py     keeping a copy of every picture, on disk
+    filenames.py   what a stranger called their file, made safe to be a path
     handlers.py    commands, buttons, media routing
     format.py      the report as a Telegram message
     keyboards.py   reply and inline keyboards, callback factories

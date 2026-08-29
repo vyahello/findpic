@@ -21,6 +21,7 @@ from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats
 
 from ..exif import ExifTool, ExifToolMissing
 from ..i18n import FALLBACK_LANGUAGE, Translator, available_languages
+from .archive import Archive
 from .config import Config, ConfigError
 from .handlers import media_router, router
 from .middlewares import AccessMiddleware, AuditMiddleware, LanguageMiddleware, ThrottleMiddleware
@@ -30,7 +31,11 @@ from .storage import Storage
 logger = logging.getLogger("findpic.bot")
 
 #: Commands offered in Telegram's menu, per language.
+#: Commands offered in Telegram's menu, per language. `forget` appears only
+#: when there is something to forget — offering to delete photographs a bot
+#: does not keep is a confusing promise.
 MENU_COMMANDS = ("help", "lang", "privacy", "about")
+ARCHIVE_COMMANDS = ("forget",)
 
 #: How often expired analysis handles are swept.
 CLEANUP_INTERVAL = 3600
@@ -49,7 +54,7 @@ def build_session(config: Config) -> AiohttpSession | None:
     )
 
 
-async def configure_profile(bot: Bot) -> None:
+async def configure_profile(bot: Bot, config: Config | None = None) -> None:
     """Publish the bot's public profile, in every language it speaks.
 
     Name, descriptions and command menu are set through the API on every start
@@ -64,9 +69,10 @@ async def configure_profile(bot: Bot) -> None:
         # English is the fallback profile, so it goes in with no language_code.
         language = None if code == FALLBACK_LANGUAGE else code
 
+        offered = MENU_COMMANDS + (ARCHIVE_COMMANDS if config and config.archiving else ())
         commands = [
             BotCommand(command=name, description=translator.get(f"bot.command.{name}"))
-            for name in MENU_COMMANDS
+            for name in offered
         ]
         calls = (
             (
@@ -105,6 +111,25 @@ async def configure_profile(bot: Bot) -> None:
                 logger.warning("could not set %s for %s: %s", what, code, error)
 
 
+async def purge_archive(storage: Storage, config: Config) -> int:
+    """Delete kept pictures past their window — the file before its row.
+
+    That order is deliberate. A crash between the two leaves a row pointing at a
+    file that is gone: visible, harmless, and reportable as "copy already
+    deleted". The other order leaves a photograph on disk that nothing in the
+    database knows about — a promise broken silently, and forever.
+    """
+    if not config.archiving or config.archive_retention_days <= 0:
+        return 0
+    archive = Archive(config.archive_dir)
+    dropped = 0
+    for photo_id, rel_path in await storage.expired_archive_files(config.archive_retention_days):
+        await asyncio.to_thread(archive.discard, rel_path)
+        await storage.forget_archived(photo_id)
+        dropped += 1
+    return dropped
+
+
 async def cleanup_loop(storage: Storage, config: Config) -> None:
     """Drop stale analysis handles so the database stays small."""
     import time
@@ -117,10 +142,16 @@ async def cleanup_loop(storage: Storage, config: Config) -> None:
             removed = await storage.purge_expired(time.time() - config.analysis_ttl_seconds)
             await storage.purge_old_usage()
             forgotten = await storage.purge_old_events(config.analytics_retention_days)
+            # Deliberately outside any `keep_days <= 0` guard on the analytics
+            # side: "keep the usage log forever" is a documented option, and it
+            # must not silently disable the archive's own, separate clock.
+            dropped = await purge_archive(storage, config)
             if removed:
                 logger.info("purged %s expired analysis handles", removed)
             if forgotten:
                 logger.info("forgot %s usage records past the retention window", forgotten)
+            if dropped:
+                logger.info("deleted %s archived pictures past their retention window", dropped)
             await asyncio.sleep(CLEANUP_INTERVAL)
         except asyncio.CancelledError:
             raise
@@ -142,6 +173,24 @@ async def run(config: Config) -> None:
     storage = Storage(config.database_path)
     await storage.connect()
 
+    archive = None
+    if config.archiving:
+        archive = Archive(
+            config.archive_dir,
+            max_file_bytes=config.archive_max_file_bytes,
+            max_total_bytes=config.archive_max_total_bytes,
+            max_user_bytes=config.archive_max_user_bytes,
+            min_free_bytes=config.archive_min_free_bytes,
+        )
+        # Proved at startup rather than on the first photograph. A silently
+        # non-functioning archive is the worst outcome available: the operator
+        # would believe pictures were being kept for weeks.
+        problem = await asyncio.to_thread(archive.prepare)
+        if problem:
+            logger.error("archiving is configured but not working — %s", problem)
+        else:
+            logger.info("archiving to %s", config.archive_dir)
+
     session = build_session(config)
     bot = Bot(
         token=config.token,
@@ -153,7 +202,7 @@ async def run(config: Config) -> None:
     dispatcher.workflow_data.update(
         config=config,
         storage=storage,
-        service=AnalysisService(config, exiftool),
+        service=AnalysisService(config, exiftool, archive),
     )
 
     # Order matters. Language first, so every later middleware can phrase its
@@ -174,7 +223,7 @@ async def run(config: Config) -> None:
     dispatcher.include_router(media_router)
     dispatcher.include_router(router)
 
-    await configure_profile(bot)
+    await configure_profile(bot, config)
     cleaner = asyncio.create_task(cleanup_loop(storage, config))
 
     try:

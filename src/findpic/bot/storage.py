@@ -276,6 +276,13 @@ class PhotoRecord:
     country: str | None = None
     lat: float | None = None
     lon: float | None = None
+    # What became of the copy, when one was asked for. Set at insert time
+    # because the archive runs before the analysis — a file that crashes
+    # exiftool is exactly the one worth having on disk.
+    sha256: str | None = None
+    bytes_kept: int | None = None
+    state: str | None = None
+    rel_path: str | None = None
 
     def columns(self) -> list[str]:
         return [name for name, value in self.__dict__.items() if value is not None]
@@ -696,6 +703,66 @@ class Storage:
         await self.db.execute(
             "UPDATE photos SET sha256 = ?, bytes_kept = ?, state = ?, rel_path = ? WHERE id = ?",
             (sha256, bytes_kept, state, rel_path, photo_id),
+        )
+        await self.db.commit()
+
+    async def forget_everything(self, user_id: int) -> tuple[list[str], int]:
+        """Delete one person's record, and say what there was to delete.
+
+        Returns the archived files to unlink and how many usage rows went. The
+        files are handed back rather than removed here — this class knows about
+        SQL and the archive knows about disks, and mixing them is how a delete
+        ends up half done in one of the two.
+
+        The `users` row survives, deliberately: it holds a language preference
+        the person chose, and silently resetting it would be a worse surprise
+        than keeping it. The notice says so rather than claiming "everything".
+        """
+        async with self.db.execute(
+            "SELECT rel_path FROM photos WHERE user_id = ? AND rel_path IS NOT NULL",
+            (user_id,),
+        ) as cursor:
+            files = [row["rel_path"] for row in await cursor.fetchall()]
+
+        async with self.db.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE user_id = ?", (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        events = int(row["n"]) if row else 0
+
+        for statement in (
+            "DELETE FROM photos WHERE user_id = ?",
+            "DELETE FROM events WHERE user_id = ?",
+            "DELETE FROM people WHERE user_id = ?",
+            "DELETE FROM analyses WHERE user_id = ?",
+            "DELETE FROM usage WHERE user_id = ?",
+        ):
+            await self.db.execute(statement, (user_id,))
+        await self.db.commit()
+        return files, events
+
+    async def expired_archive_files(self, keep_days: int) -> list[tuple[int, str]]:
+        """Kept pictures older than the window, as ``(photo_id, rel_path)``."""
+        if keep_days <= 0:
+            return []
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=keep_days)).isoformat(
+            timespec="seconds"
+        )
+        async with self.db.execute(
+            "SELECT id, rel_path FROM photos WHERE rel_path IS NOT NULL AND at < ?",
+            (cutoff,),
+        ) as cursor:
+            return [(int(row["id"]), row["rel_path"]) for row in await cursor.fetchall()]
+
+    async def forget_archived(self, photo_id: int) -> None:
+        """The row survives the file, saying the copy is gone.
+
+        Keeping the row is the point: the ledger still shows the picture was
+        received and what was found in it, which is the analytics the operator
+        asked for. Only the copy has a shorter life than the record of it.
+        """
+        await self.db.execute(
+            "UPDATE photos SET rel_path = NULL, state = 'evicted' WHERE id = ?", (photo_id,)
         )
         await self.db.commit()
 

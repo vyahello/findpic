@@ -69,6 +69,13 @@ jobs:
           THROTTLE_SECONDS: ${{ vars.THROTTLE_SECONDS || '3' }}
           MAX_FILE_MB: ${{ vars.MAX_FILE_MB || '64' }}
           LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+          ANALYTICS: ${{ vars.ANALYTICS || '1' }}
+          ANALYTICS_RETENTION_DAYS: ${{ vars.ANALYTICS_RETENTION_DAYS || '90' }}
+          # Empty keeps no copies, which is the default. Set the ARCHIVE_DIR
+          # repository variable to '/archive' to start keeping every picture the
+          # bot is sent — a decision about other people's photographs, so it is
+          # deliberately not on unless somebody turns it on.
+          ARCHIVE_DIR: ${{ vars.ARCHIVE_DIR || '' }}
           # The container must run as the host user the Bot API volume's ACL
           # grants read access to. Resolved on the VPS rather than hardcoded.
           APP_UID: ${{ vars.APP_UID || '' }}
@@ -97,6 +104,9 @@ jobs:
               printf 'APP_UID=%s\n'               "$APP_UID"
               printf 'APP_GID=%s\n'               "$APP_GID"
               printf 'DROP_PENDING_UPDATES=1\n'
+              printf 'ANALYTICS=%s\n'             "${ANALYTICS:-1}"
+              printf 'ANALYTICS_RETENTION_DAYS=%s\n' "${ANALYTICS_RETENTION_DAYS:-90}"
+              printf 'ARCHIVE_DIR=%s\n'           "$ARCHIVE_DIR"
             } | base64 -w0
           )"
 
@@ -130,6 +140,22 @@ jobs:
           sed -i "s/^APP_UID=.*/APP_UID=${uid}/; s/^APP_GID=.*/APP_GID=${gid}/" deploy/.env
           grep -q '^APP_UID=' deploy/.env || printf 'APP_UID=%s\nAPP_GID=%s\n' "$uid" "$gid" >> deploy/.env
           echo "==> container will run as uid=${uid} gid=${gid}"
+
+          # The archive is a bind mount, and Docker creates a missing bind
+          # source as root:root — after which the container could never write to
+          # it, a failure that looks exactly like a broken archive with no error
+          # anywhere. Creating it here, as the deploy user, means it is already
+          # owned by the uid the container runs as. Outside the checkout on
+          # purpose: `git clean -qfd` above would delete an archive inside it.
+          archive_host="${HOME}/findpic-archive"
+          mkdir -p "${archive_host}"
+          chmod 750 "${archive_host}"
+          printf 'ARCHIVE_HOST_DIR=%s\n' "${archive_host}" >> deploy/.env
+          if grep -q '^ARCHIVE_DIR=.' deploy/.env; then
+            echo "==> keeping a copy of every picture in ${archive_host}"
+          else
+            echo "==> archiving is off (set the ARCHIVE_DIR repository variable to /archive)"
+          fi
           chmod 600 deploy/.env
 
           cd deploy

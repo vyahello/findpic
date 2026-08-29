@@ -13,6 +13,7 @@ after — why there is nothing to see and how to get a real answer.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import datetime as dt
 import json
@@ -31,6 +32,7 @@ from ..exif import ExifTool, ExifToolError
 from ..i18n import LANGUAGE_NAMES, Translator
 from ..models import Category, Report, Severity
 from ..util import parse_exif_datetime
+from .archive import Stored
 from .config import Config
 from .filenames import IMAGE_SUFFIXES
 from .format import esc, render_report, render_tag_dump, report_is_stripped
@@ -43,7 +45,7 @@ from .keyboards import (
     menu_labels,
     report_keyboard,
 )
-from .service import AnalysisService, CleanResult
+from .service import AnalysisService, CleanResult, KeepRequest
 from .storage import PhotoRecord, QuotaVerdict, Storage
 
 logger = logging.getLogger(__name__)
@@ -147,6 +149,8 @@ def privacy_notice(t: Translator, config: Config) -> str:
     whether to trust the thing, and it is the whole argument of the project that
     a claim about your data should be checkable.
     """
+    hours = config.analysis_ttl_seconds // 3600
+
     if not config.analytics:
         extra = t.get("bot.privacy.no_analytics")
     else:
@@ -156,11 +160,50 @@ def privacy_notice(t: Translator, config: Config) -> str:
             if days > 0
             else t.get("bot.privacy.retention.forever")
         )
-        extra = (
-            f"{t.get('bot.privacy.analytics')} {retention}\n"
-            f"{t.get('bot.privacy.never', ttl_hours=config.analysis_ttl_seconds // 3600)}"
+        kept = t.get("bot.privacy.analytics")
+        if config.keeps_capture:
+            kept = f"{kept} {t.get('bot.privacy.capture')}"
+        # Once the whole file is kept, the old "never records where or when"
+        # promise is false — the photograph itself carries both, and the bot has
+        # it. Say that plainly rather than keeping a sentence that is true only
+        # of the columns.
+        never = (
+            t.get("bot.privacy.archive.never")
+            if config.archiving
+            else t.get("bot.privacy.never", ttl_hours=hours)
         )
-    return t.get("bot.privacy", ttl_hours=config.analysis_ttl_seconds // 3600, extra=extra)
+        extra = f"{kept} {retention}\n{never}"
+
+    notice = t.get(
+        "bot.privacy",
+        ttl_hours=hours,
+        extra=extra,
+        archive=_archive_notice(t, config),
+    )
+    if config.archiving:
+        # Last, not woven into the bullets: it is an offer to act, and it reads
+        # as one only after the reader knows what there is to act on.
+        notice = f"{notice}\n\n{t.get('bot.privacy.forget')}"
+    return notice
+
+
+def _archive_notice(t: Translator, config: Config) -> str:
+    """What the bot does with the file itself.
+
+    A slot rather than two alternative notices, so a build that keeps nothing
+    shows today's words unchanged and neither version can drift out of step
+    with what the code actually does.
+    """
+    if not config.archiving:
+        return t.get("bot.privacy.archive.off")
+
+    days = config.archive_retention_days
+    retention = (
+        t.get("bot.privacy.archive.retention", days)
+        if days > 0
+        else t.get("bot.privacy.archive.forever")
+    )
+    return "\n".join((t.get("bot.privacy.archive.on"), retention))
 
 
 async def show_privacy(message: Message, t: Translator, config: Config) -> None:
@@ -198,6 +241,53 @@ async def handle_privacy(message: Message, t: Translator, config: Config) -> Non
 @router.message(Command("about"))
 async def handle_about(message: Message, t: Translator) -> None:
     await show_about(message, t)
+
+
+#: Who has asked to be forgotten and has not yet confirmed, against when they
+#: asked. In memory on purpose: a pending confirmation that survived a restart
+#: would be a deletion somebody had forgotten they requested.
+_pending_forget: dict[int, float] = {}
+
+#: How long a confirmation stays good for.
+FORGET_WINDOW = 60.0
+
+
+@router.message(Command("forget"))
+async def handle_forget(
+    message: Message, t: Translator, config: Config, storage: Storage, service: AnalysisService
+) -> None:
+    """Delete everything the bot holds about one person, on their own say-so.
+
+    The counterpart to keeping their photographs. A bot that keeps copies and
+    offers no way to take them back has disclosed a fact rather than offered a
+    choice, and the disclosure is the weaker half.
+
+    Two steps, because this cannot be undone: the first /forget says exactly
+    what is about to go, the second within a minute does it.
+    """
+    user = message.from_user
+    if user is None:
+        return
+
+    asked = _pending_forget.get(user.id, 0.0)
+    if time.monotonic() - asked > FORGET_WINDOW:
+        _pending_forget[user.id] = time.monotonic()
+        await message.answer(
+            t.get("bot.forget.confirm", language=t.language_name()),
+            disable_web_page_preview=True,
+        )
+        return
+
+    _pending_forget.pop(user.id, None)
+    files, events = await storage.forget_everything(user.id)
+    if service.archive is not None:
+        for rel_path in files:
+            await asyncio.to_thread(service.archive.discard, rel_path)
+
+    if not files and not events:
+        await message.answer(t.get("bot.forget.nothing"))
+        return
+    await message.answer(t.get("bot.forget.done", photos=len(files), events=events))
 
 
 class MenuButton(BaseFilter):
@@ -379,10 +469,27 @@ async def _analyse_and_reply(
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
     started = time.monotonic()
-    try:
-        report = await service.analyse(
-            bot=bot, file_id=file_id, file_name=file_name, language=t.language
+    keep = None
+    if config.archiving:
+        held, _ = await _quietly(storage.archive_usage(), "read the archive size", (0, 0))
+        keep = KeepRequest(
+            user_id=message.from_user.id,
+            when=dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+            held_bytes=held,
+            user_bytes=await _quietly(
+                storage.user_archive_bytes(message.from_user.id), "read a user's usage", 0
+            )
+            or 0,
         )
+    try:
+        analysis = await service.analyse(
+            bot=bot,
+            file_id=file_id,
+            file_name=file_name,
+            language=t.language,
+            keep=keep,
+        )
+        report = analysis.report
     except ExifToolError as error:
         logger.warning("analysis failed for %s: %s", file_name, error)
         await _refuse(storage, event_id, message.from_user, "unreadable")
@@ -410,6 +517,11 @@ async def _analyse_and_reply(
                 clean_offered=offer_clean,
                 duration_ms=int((time.monotonic() - started) * 1000),
                 capture=config.keeps_capture,
+                # Recorded even when the archive refused. An archive whose
+                # failures are invisible is worse than none: the operator would
+                # believe pictures were being kept and find out only when they
+                # went looking for one.
+                stored=analysis.stored,
             )
         ),
         "record the photo",
@@ -445,7 +557,7 @@ async def _analyse_and_reply(
         # A name the bot invented for a compressed photo means nothing to the
         # person who sent it — they never saw "telegram_photo_AgADBAADq6cx.jpg".
         name=esc(t.get("bot.headline.compressed_photo")) if compressed else "",
-        footer=_quota_footer(t, quota),
+        footer=_footer(t, config, quota),
     )
     await message.answer(
         body,
@@ -459,6 +571,22 @@ async def _analyse_and_reply(
         ),
         disable_web_page_preview=True,
     )
+
+
+def _footer(t: Translator, config: Config, quota: QuotaVerdict | None) -> str:
+    """The two things worth saying under a report rather than inside it.
+
+    The archive line is the only place the fact reaches somebody who never
+    opens /privacy — which is most people. It costs one line, and a bot that
+    keeps your photographs without ever mentioning it where you would see is
+    not being straight with you.
+    """
+    lines = [line for line in (_archive_footer(t, config), _quota_footer(t, quota)) if line]
+    return "\n".join(lines)
+
+
+def _archive_footer(t: Translator, config: Config) -> str:
+    return f"<i>{esc(t.get('bot.archive.footer'))}</i>" if config.archiving else ""
 
 
 def _quota_footer(t: Translator, quota: QuotaVerdict | None) -> str:
@@ -487,6 +615,7 @@ def build_photo_record(
     clean_offered: bool,
     duration_ms: int,
     capture: bool,
+    stored: Stored | None = None,
 ) -> PhotoRecord:
     """One picture's row, from what the analysis actually found.
 
@@ -538,6 +667,10 @@ def build_photo_record(
         duration_ms=duration_ms,
         warnings=len(report.exiftool_warnings),
         errors=len(report.errors),
+        sha256=stored.sha256 if stored else None,
+        bytes_kept=stored.size if stored else None,
+        state=stored.state if stored else None,
+        rel_path=stored.rel_path if stored else None,
     )
     if capture:
         _add_capture(record, report)
@@ -615,12 +748,15 @@ async def handle_show_tags(
     await _quietly(storage.note_photo_action(handle.photo_id, "tags"), "note the tap")
     await query.answer(t.get("bot.status.working"))
     try:
-        report = await service.analyse(
+        # keep is not passed: pressing a button is not sending a picture, and
+        # counting it as one would double every archived file in the ledger.
+        analysis = await service.analyse(
             bot=bot,
             file_id=handle.file_id,
             file_name=handle.file_name or "photo",
             language=t.language,
         )
+        report = analysis.report
     except Exception:  # noqa: BLE001
         logger.exception("tag dump failed")
         await query.message.answer(t.get("bot.error.internal"))

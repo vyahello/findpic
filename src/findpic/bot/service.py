@@ -31,6 +31,7 @@ from ..exif import ExifTool, Metadata
 from ..geocode import Geocoder
 from ..models import Report
 from ..restore import SIDECAR_SUFFIX, backup
+from .archive import Archive, Stored
 from .config import Config
 from .filenames import clean_copy_name, display_name, safe_suffix
 
@@ -61,6 +62,29 @@ _LOSS_PROBES = (
 
 
 @dataclass(frozen=True)
+class KeepRequest:
+    """Ask for a copy to be kept, with the budget it has to fit inside.
+
+    The two byte counts are read from the manifest by the caller rather than by
+    the archive, because the archive is deliberately SQL-free — it knows about
+    files and nothing else.
+    """
+
+    user_id: int
+    when: str
+    held_bytes: int = 0
+    user_bytes: int = 0
+
+
+@dataclass(frozen=True)
+class Analysis:
+    """A report, and what became of the copy — when one was asked for."""
+
+    report: Report
+    stored: Stored | None = None
+
+
+@dataclass(frozen=True)
 class CleanResult:
     """A scrubbed copy and what leaving the metadata behind actually cost.
 
@@ -85,9 +109,10 @@ def _what_left(before: Metadata | None, after: Metadata | None) -> tuple[str, ..
 class AnalysisService:
     """Fetches files from Telegram and runs findpic against them."""
 
-    def __init__(self, config: Config, exiftool: ExifTool) -> None:
+    def __init__(self, config: Config, exiftool: ExifTool, archive: Archive | None = None) -> None:
         self.config = config
         self.exiftool = exiftool
+        self.archive = archive
         self.config.work_dir.mkdir(parents=True, exist_ok=True)
         # One geocoder for the life of the process, not one per photo. A fresh
         # instance re-reads the whole cache file inside the worker thread on
@@ -179,9 +204,38 @@ class AnalysisService:
 
     # --------------------------------------------------------------- analyse
 
-    async def analyse(self, *, bot: Bot, file_id: str, file_name: str, language: str) -> Report:
+    async def analyse(
+        self,
+        *,
+        bot: Bot,
+        file_id: str,
+        file_name: str,
+        language: str,
+        keep: KeepRequest | None = None,
+    ) -> Analysis:
+        """Read the file, and keep a copy of it when asked to.
+
+        The copy is taken here rather than in the handler, and taken *before*
+        the analysis runs. Here, because the working copy is unlinked in the
+        ``finally`` below and the Bot API server's own copy is mounted read-only
+        and deleted by the janitor five minutes later — this is the only window
+        in which the bytes exist anywhere the bot can reach. Before the analysis,
+        because a file that crashes exiftool is precisely the one an operator
+        wants on disk to reproduce with.
+        """
         local, server_path = await self._fetch(bot, file_id, file_name)
+        stored: Stored | None = None
         try:
+            if keep is not None and self.archive is not None:
+                stored = await asyncio.to_thread(
+                    self.archive.store,
+                    local,
+                    user_id=keep.user_id,
+                    when=keep.when,
+                    claimed_suffix=safe_suffix(file_name, ""),
+                    held_bytes=keep.held_bytes,
+                    user_bytes=keep.user_bytes,
+                )
             # Give the report the name the user sent, not our temporary one —
             # filename-based findings would otherwise be nonsense.
             named = local.with_name(display_name(file_name))
@@ -190,13 +244,14 @@ class AnalysisService:
                 local = named
 
             options = AnalysisOptions(geocode=True, language=language, hash_file=True)
-            return await asyncio.to_thread(
+            report = await asyncio.to_thread(
                 analyze,
                 local,
                 self.exiftool,
                 self._geocoder(language),
                 options,
             )
+            return Analysis(report=report, stored=stored)
         finally:
             local.unlink(missing_ok=True)
             self._delete_source(server_path)

@@ -38,11 +38,34 @@ services:
       # read-only image: every save failed silently and every GPS photo paid a
       # live Nominatim round trip, one per second, holding a worker thread.
       XDG_CACHE_HOME: /data/cache
+      # Keeping a copy of every picture. Commented out is the default: an
+      # archive is a decision about other people's photographs, not a setting.
+      # ARCHIVE_HOST_DIR in deploy/.env chooses where they land on the host.
+      ARCHIVE_DIR: ${ARCHIVE_DIR:-}
+      ARCHIVE_MAX_FILE_MB: "32"
+      ARCHIVE_MAX_TOTAL_MB: "4096"
+      ARCHIVE_MAX_USER_MB: "512"
+      ARCHIVE_MIN_FREE_MB: "2048"
+      ARCHIVE_RETENTION_DAYS: "30"
       # The janitor owns deletion; this process has no write access there.
       DELETE_SOURCE_FILES: "0"
     volumes:
       - findpic-data:/data
       - /var/lib/telegram-bot-api:/var/lib/telegram-bot-api:ro
+      # A bind mount rather than a named volume, and that is the whole point: a
+      # named volume lives under /var/lib/docker as root:root 0700, so looking
+      # at a single JPEG would need sudo or a throwaway container. This is
+      # ls-able and scp-able with neither. It stays writable despite
+      # `read_only: true`, which governs the image layers and not the mounts.
+      #
+      # Must be an absolute path OUTSIDE the checkout: the deploy workflow runs
+      # `git clean -qfd`, which would delete an archive sitting under the repo.
+      #
+      # Mounted unconditionally, with ARCHIVE_DIR as the switch. A conditional
+      # mount would mean the compose file changes shape depending on a variable,
+      # and the failure when it is wrong is a container that will not start.
+      # An empty directory nobody writes to costs nothing.
+      - ${ARCHIVE_HOST_DIR:-/tmp/findpic-archive}:/archive
     networks:
       - remy
     tmpfs:

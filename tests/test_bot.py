@@ -1065,3 +1065,244 @@ def test_a_report_still_sends_when_the_handle_could_not_be_stored() -> None:
     keyboard = report_keyboard(Translator("en"), None, offer_clean=True, offer_backup=True)
     captions = [button.text for row in keyboard.inline_keyboard for button in row]
     assert captions == ["🌐 Language"]
+
+
+# ------------------------------------------------------------- the archive
+
+
+@pytest.fixture
+def archive(tmp_path: Path):
+    from findpic.bot.archive import Archive
+
+    store = Archive(tmp_path / "archive")
+    assert store.prepare() is None
+    return store
+
+
+def a_photo(tmp_path: Path, name: str = "p.jpg", payload: bytes = b"one") -> Path:
+    path = tmp_path / name
+    path.write_bytes(b"\xff\xd8\xff\xe0" + payload)
+    return path
+
+
+def test_the_same_picture_twice_is_one_copy_and_two_entries(archive, tmp_path: Path) -> None:
+    """Both sends have to stay visible, and the bytes must not be stored twice."""
+    source = a_photo(tmp_path)
+    first = archive.store(source, user_id=7, when="20260829T134501Z")
+    second = archive.store(source, user_id=8, when="20260829T140000Z")
+
+    assert first.state == "stored"
+    assert second.state == "duplicate"
+    assert first.sha256 == second.sha256
+    assert first.rel_path != second.rel_path
+    blobs = list((archive.root / "objects").rglob("*.jpg"))
+    assert len(blobs) == 1
+    assert blobs[0].stat().st_nlink == 3  # the blob plus two browsable names
+
+
+def test_the_same_second_does_not_collide(archive, tmp_path: Path) -> None:
+    """An admin bypasses the throttle entirely, so this is ordinary for them."""
+    source = a_photo(tmp_path)
+    first = archive.store(source, user_id=7, when="20260829T134501Z")
+    second = archive.store(source, user_id=7, when="20260829T134501Z")
+    assert first.rel_path != second.rel_path
+    assert archive.resolve(first.rel_path) is not None
+    assert archive.resolve(second.rel_path) is not None
+
+
+def test_evicting_one_send_keeps_the_other_persons_picture(archive, tmp_path: Path) -> None:
+    """Getting the link count backwards deletes somebody else's photograph."""
+    source = a_photo(tmp_path)
+    mine = archive.store(source, user_id=7, when="20260829T134501Z")
+    theirs = archive.store(source, user_id=8, when="20260829T140000Z")
+
+    assert archive.discard(mine.rel_path) == 0, "the bytes are still referenced"
+    assert archive.resolve(theirs.rel_path) is not None
+    assert archive.discard(theirs.rel_path) > 0
+    assert not list((archive.root / "objects").rglob("*.jpg"))
+
+
+def test_no_sender_chosen_text_ever_reaches_a_path(archive, tmp_path: Path) -> None:
+    """Traversal, NUL bytes and overrides are impossible here by construction."""
+    source = a_photo(tmp_path, "innocent.jpg")
+    stored = archive.store(
+        source, user_id=7, when="20260829T134501Z", claimed_suffix="../../../etc/x"
+    )
+    assert stored.state == "stored"
+    assert ".." not in stored.rel_path
+    assert archive.resolve(stored.rel_path) is not None
+
+
+def test_the_extension_comes_from_the_bytes_not_the_claim(archive, tmp_path: Path) -> None:
+    """A file that crashes exiftool is the one most worth having on disk, so
+    the type has to be readable before any analysis runs."""
+    from findpic.bot.archive import sniff
+
+    assert sniff(b"\xff\xd8\xff\xe0" + b"x" * 12) == ".jpg"
+    assert sniff(b"\x89PNG\r\n\x1a\n") == ".png"
+    assert sniff(b"\x00\x00\x00\x18ftypheic") == ".heic"
+    assert sniff(b"\x00\x00\x00\x18ftypmif1") == ".heic"
+    assert sniff(b"nothing recognisable") == ".bin"
+
+    source = a_photo(tmp_path, "lying.png")
+    stored = archive.store(source, user_id=7, when="20260829T134501Z", claimed_suffix=".png")
+    assert stored.rel_path.endswith(".jpg")
+
+
+def test_an_oversized_file_is_refused_and_says_so(tmp_path: Path) -> None:
+    """A refusal still gets a row. An archive whose failures are invisible is
+    worse than none — the operator would believe pictures were being kept."""
+    from findpic.bot.archive import Archive
+
+    store = Archive(tmp_path / "a", max_file_bytes=10)
+    store.prepare()
+    stored = store.store(a_photo(tmp_path, payload=b"x" * 100), user_id=7, when="20260829T1Z")
+    assert stored.state == "skipped_big"
+    assert stored.rel_path is None
+
+
+def test_a_full_disk_never_raises(tmp_path: Path) -> None:
+    """An OSError here would surface to the user as "the bot is broken"."""
+    from findpic.bot.archive import Archive
+
+    store = Archive(tmp_path / "a", min_free_bytes=10**15)
+    store.prepare()
+    stored = store.store(a_photo(tmp_path), user_id=7, when="20260829T1Z")
+    assert stored.state == "skipped_space"
+
+
+def test_an_unwritable_root_is_reported_at_startup(tmp_path: Path) -> None:
+    """Not on the first photograph: a silently dead archive is the worst case."""
+    from findpic.bot.archive import Archive
+
+    blocked = tmp_path / "blocked"
+    blocked.mkdir(mode=0o500)
+    try:
+        problem = Archive(blocked / "archive").prepare()
+        assert problem and "cannot write" in problem
+    finally:
+        blocked.chmod(0o700)
+
+
+def test_resolve_refuses_to_leave_the_archive(archive, tmp_path: Path) -> None:
+    assert archive.resolve("../../etc/passwd") is None
+    assert archive.resolve("by-date/../../../etc/passwd") is None
+
+
+async def test_forget_deletes_the_pictures_and_the_record(storage: Storage) -> None:
+    """The counterpart to keeping copies. Without it the disclosure is a notice
+    rather than a choice, and the notice is the weaker half."""
+    from findpic.bot.storage import PhotoRecord
+
+    await storage.record_event(Person(7, "someone"), kind="file")
+    await storage.record_photo(
+        PhotoRecord(
+            user_id=7, at="2026-08-29T10:00:00+00:00", rel_path="by-date/x/one.jpg", state="stored"
+        )
+    )
+    await storage.record_photo(
+        PhotoRecord(user_id=8, at="2026-08-29T10:00:00+00:00", rel_path="by-date/x/two.jpg")
+    )
+    await storage.set_language(7, "uk")
+
+    files, events = await storage.forget_everything(7)
+    assert files == ["by-date/x/one.jpg"]
+    assert events == 1
+    assert await rows(storage, "SELECT * FROM photos WHERE user_id = 7") == []
+    assert await rows(storage, "SELECT * FROM people WHERE user_id = 7") == []
+    # Somebody else's picture is untouched.
+    assert len(await rows(storage, "SELECT * FROM photos WHERE user_id = 8")) == 1
+    # The language choice survives, and the notice says so rather than
+    # claiming "everything".
+    assert await storage.get_language(7, "en") == "uk"
+
+
+async def test_retention_deletes_the_file_before_its_row(storage: Storage) -> None:
+    """A crash between the two must leave a row saying the copy is gone, never
+    a photograph on disk that nothing in the database knows about."""
+    from findpic.bot.storage import PhotoRecord
+
+    photo_id = await storage.record_photo(
+        PhotoRecord(
+            user_id=7,
+            at="2020-01-01T00:00:00+00:00",
+            rel_path="by-date/2020-01-01/old.jpg",
+            state="stored",
+        )
+    )
+    assert await storage.expired_archive_files(keep_days=30) == [
+        (photo_id, "by-date/2020-01-01/old.jpg")
+    ]
+    await storage.forget_archived(photo_id)
+    assert await storage.expired_archive_files(keep_days=30) == []
+    row = (await rows(storage, "SELECT * FROM photos"))[0]
+    assert row["state"] == "evicted" and row["rel_path"] is None
+    assert row["user_id"] == 7, "the ledger still says whose it was"
+
+
+async def test_the_archive_accounting_counts_blobs_not_rows(storage: Storage) -> None:
+    """Summing the column drifts above the truth and starts refusing writes
+    while the disk is half empty: a duplicate carries a full byte count while
+    costing nothing."""
+    from findpic.bot.storage import PhotoRecord
+
+    for user, state in ((7, "stored"), (8, "duplicate"), (9, "duplicate")):
+        await storage.record_photo(
+            PhotoRecord(
+                user_id=user,
+                at="2026-08-29T10:00:00+00:00",
+                sha256="deadbeef",
+                bytes_kept=1000,
+                state=state,
+            )
+        )
+    held, saved = await storage.archive_usage()
+    assert held == 1000, "one copy of the bytes exists"
+    assert saved == 2000, "two sends cost nothing"
+
+
+@pytest.mark.parametrize("language", available_languages())
+def test_the_notice_says_the_bot_keeps_a_copy_when_it_does(language: str) -> None:
+    """This cannot ship in either order: the bot currently tells every user, in
+    both languages, that nothing is archived."""
+    t = Translator(language)
+    off = privacy_notice(t, Config(token=TOKEN))
+    on = privacy_notice(t, Config(token=TOKEN, archive_dir=Path("/archive")))
+
+    assert t.get("bot.privacy.archive.off") in off
+    assert t.get("bot.privacy.archive.on") not in off
+
+    assert t.get("bot.privacy.archive.on") in on
+    assert t.get("bot.privacy.archive.off") not in on
+    assert t.get("bot.privacy.forget") in on, (
+        "keeping copies without an undo is a notice, not a choice"
+    )
+    assert "30" in on, "the retention window has to be stated"
+    assert "{" not in on and "{" not in off
+    assert len(on) < MESSAGE_LIMIT
+
+
+def test_the_notice_never_describes_a_build_other_than_the_running_one() -> None:
+    """The one screen where somebody decides whether to trust this. Every
+    permutation has to describe what the running configuration actually writes."""
+    import itertools
+
+    t = Translator("en")
+    for analytics, capture, archiving, days in itertools.product(
+        (True, False), (True, False), (True, False), (0, 30)
+    ):
+        config = Config(
+            token=TOKEN,
+            analytics=analytics,
+            analytics_capture=capture,
+            analytics_retention_days=days,
+            archive_dir=Path("/archive") if archiving else None,
+        )
+        notice = privacy_notice(t, config)
+        assert "{" not in notice
+        assert (t.get("bot.privacy.archive.on") in notice) is archiving
+        assert (t.get("bot.privacy.analytics") in notice) is analytics
+        # Capture is implied by archiving: the file on disk holds the exact
+        # coordinates, so withholding a locality from the index would be theatre.
+        expected_capture = analytics and (capture or archiving)
+        assert (t.get("bot.privacy.capture") in notice) is expected_capture
