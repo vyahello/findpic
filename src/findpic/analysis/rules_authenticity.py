@@ -72,7 +72,14 @@ def jpeg_digest(context: Context) -> Iterable[Finding]:
             "JPEGDigest": digest,
             "JPEGQualityEstimate": context.meta.get("File:JPEGQualityEstimate"),
         },
-        weight=30 if variant == "editor" else 18,
+        # 25 is the FAIR/POOR boundary, so a library re-encode lands in POOR
+        # on its own. It used to score 18, which meant a file exiftool names
+        # as fully re-compressed by libjpeg was shown to the reader as
+        # "LIKELY ORIGINAL — looks original, small inconsistencies".
+        # Kept strictly below `editor`: libjpeg is used by so much
+        # server-side tooling that naming it is weaker evidence than a
+        # desktop editor's own tables.
+        weight=30 if variant == "editor" else 25,
     )
 
 

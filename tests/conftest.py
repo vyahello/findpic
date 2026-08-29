@@ -38,6 +38,12 @@ def _exiftool(*args: str) -> None:
 
 
 @pytest.fixture(scope="session")
+def samples_dir() -> Path:
+    """The owner's own photographs. Read-only, always — they are originals."""
+    return SAMPLES
+
+
+@pytest.fixture(scope="session")
 def fixture_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tmp_path_factory.mktemp("findpic-fixtures")
 

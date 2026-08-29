@@ -21,9 +21,11 @@ from ..models import (
     PersonRegion,
 )
 from ..tables import (
+    ANDROID_BUILD,
     APPLE_CAMERA_TYPE,
     APPLE_IMAGE_CAPTURE_TYPE,
     BARE_VERSION,
+    SAMSUNG_FIRMWARE,
     apple_os_name,
     match_editor,
 )
@@ -209,6 +211,11 @@ def _operating_system(meta: Metadata, device: DeviceInfo) -> str | None:
     # A Software value we recognise as an app is reported as an editor, not an OS.
     if match_editor(software):
         return None
+    # A build identifier is not an OS version, and printing "samsung SM-S911B ·
+    # S911BXXU3AWK5" invites the reader to take a firmware serial for Android.
+    # Both patterns have always been defined and neither was ever wired up.
+    if ANDROID_BUILD.match(software) or SAMSUNG_FIRMWARE.match(software):
+        return f"build {software}"
     return software
 
 

@@ -41,7 +41,7 @@ from .keyboards import (
     report_keyboard,
 )
 from .service import AnalysisService, CleanResult
-from .storage import Storage
+from .storage import QuotaVerdict, Storage
 
 logger = logging.getLogger(__name__)
 
@@ -283,6 +283,7 @@ async def handle_compressed_photo(
     storage: Storage,
     service: AnalysisService,
     event_id: int | None = None,
+    quota: QuotaVerdict | None = None,
     **_: object,
 ) -> None:
     """A picture sent the ordinary way — Telegram already stripped it."""
@@ -299,6 +300,7 @@ async def handle_compressed_photo(
         file_size=photo.file_size or 0,
         compressed=True,
         event_id=event_id,
+        quota=quota,
     )
 
 
@@ -311,6 +313,7 @@ async def handle_document(
     storage: Storage,
     service: AnalysisService,
     event_id: int | None = None,
+    quota: QuotaVerdict | None = None,
     **_: object,
 ) -> None:
     """A picture sent as a file — the original bytes, which is what we want."""
@@ -331,6 +334,7 @@ async def handle_document(
         file_size=document.file_size or 0,
         compressed=False,
         event_id=event_id,
+        quota=quota,
     )
 
 
@@ -360,6 +364,7 @@ async def _analyse_and_reply(
     file_size: int,
     compressed: bool,
     event_id: int | None = None,
+    quota: QuotaVerdict | None = None,
 ) -> None:
     if file_size and file_size > config.max_file_bytes:
         await _refuse(storage, event_id, message.from_user, "too_big")
@@ -410,7 +415,14 @@ async def _analyse_and_reply(
         # which is the single instruction the whole bot depends on.
         note = compressed_note(t)
 
-    body = render_report(report, source_note=note)
+    body = render_report(
+        report,
+        source_note=note,
+        # A name the bot invented for a compressed photo means nothing to the
+        # person who sent it — they never saw "telegram_photo_AgADBAADq6cx.jpg".
+        name=esc(t.get("bot.headline.compressed_photo")) if compressed else "",
+        footer=_quota_footer(t, quota),
+    )
     await message.answer(
         body,
         reply_markup=report_keyboard(
@@ -423,6 +435,20 @@ async def _analyse_and_reply(
         ),
         disable_web_page_preview=True,
     )
+
+
+def _quota_footer(t: Translator, quota: QuotaVerdict | None) -> str:
+    """How much of today's allowance is left, said only when it is news.
+
+    The middleware has always put this in the handler's context and the handler
+    swallowed it through **kwargs; the string it needs was translated in both
+    languages and read by no Python file. Shown from two remaining, so it is a
+    warning rather than a running total — and never for an admin, who bypasses
+    the quota entirely and so has a `quota` of None.
+    """
+    if not quota or not quota.limit or quota.limit - quota.used > 2:
+        return ""
+    return f"<i>{esc(t.get('bot.quota.footer', used=quota.used, limit=quota.limit))}</i>"
 
 
 async def _note_equipment(

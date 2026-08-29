@@ -38,7 +38,7 @@ from ..interpret import (
     describe_shutter,
     describe_subject_distance,
 )
-from ..models import Category, Report, Severity, VerdictLevel
+from ..models import Category, Confidence, Finding, Report, Severity, VerdictLevel
 from ..recover import timestamp_from_filename
 from ..util import parse_exif_datetime
 
@@ -63,8 +63,27 @@ TRACE_FINDINGS = (
     "recovery.container_rewritten",
     "recovery.preview_older",
     "recovery.preview_shape",
-    "recovery.screenshot",
+    # The one place a stripped file gets a vendor attribution on screen: the
+    # filename shape survives what the tags did not.
+    "platform.filename_hint",
 )
+
+#: Findings that explain, before the reader meets a verdict shaped like failure,
+#: why there is nothing in the file to report. They go above the headline, and
+#: they are exempt from the INFO filter every other section applies — the whole
+#: point is that they are the most important line in the message.
+PROVENANCE_FINDINGS = ("recovery.screenshot", "platform.stripped")
+
+EXPOSURE_MARK: dict[VerdictLevel, str] = {
+    VerdictLevel.GOOD: "🟢",
+    VerdictLevel.FAIR: "🟡",
+    VerdictLevel.POOR: "🟠",
+    VerdictLevel.BAD: "🔴",
+}
+
+#: How a finding's own uncertainty is spoken. HIGH says nothing — a hedge on
+#: everything is a hedge on nothing.
+HEDGE = {Confidence.MEDIUM: "bot.hedge.medium", Confidence.LOW: "bot.hedge.low"}
 
 #: Privacy findings whose substance is already on screen in another section.
 #: Repeating them is what made the old privacy block read as filler.
@@ -94,6 +113,35 @@ def _note(note: Note | None, translator: Translator) -> str | None:
     return translator.get(note.key, **params)
 
 
+def report_is_stripped(report: Report) -> bool:
+    """Nothing in this file names a camera or a moment.
+
+    One definition, used by the renderer to decide whether a verdict is worth
+    showing and by the analytics to decide what to record. They were computing
+    it separately, which meant the badge the reader saw and the statistic the
+    admin read could disagree about the same file.
+    """
+    return not (report.device.make or report.device.model) and not report.capture.taken
+
+
+def _hedged(finding: Finding, t: Translator, *, floor: Confidence = Confidence.MEDIUM) -> str:
+    """A finding's title, carrying its own confidence.
+
+    The bot attached none, so a MEDIUM guess and a HIGH certainty read
+    identically — on a tool whose entire premise is that metadata lies.
+
+    ``floor`` is what keeps that from becoming noise. A claim that justifies a
+    verdict gets the full sentence at MEDIUM and below; inside a section already
+    titled "what the file still shows", where every line is a reading of the
+    compression, only a genuine guess is worth marking.
+    """
+    text = esc(finding.title(t))
+    key = HEDGE.get(finding.confidence)
+    if key is None or finding.confidence.rank > floor.rank:
+        return text
+    return t.get(key, text=text)
+
+
 def _block(title: str, lines: list[str]) -> list[str]:
     lines = [line for line in lines if line]
     if not lines:
@@ -104,27 +152,40 @@ def _block(title: str, lines: list[str]) -> list[str]:
 # ------------------------------------------------------------------ sections
 
 
-def render_headline(report: Report) -> list[str]:
-    """Filename, size, and the one verdict worth stating up front."""
-    t = report.translator
-    size_line = f"{t.bytes(report.file.size_bytes)} · {report.file.file_type or '?'}"
-    if report.image.width and report.image.height:
-        size_line += f" · {report.image.width}×{report.image.height}"
+def render_headline(report: Report, *, name: str = "", badge: bool = True) -> list[str]:
+    """What the file is, and the one verdict worth stating up front.
 
-    lines = [f"🔎 <b>{esc(report.file.name)}</b>", f"<i>{esc(size_line)}</i>"]
+    Dimensions are deliberately absent: THE SHOT already carries them, with
+    megapixels and the aspect ratio beside them, and printing the same two
+    numbers twice in two different spacings is exactly the habit this module
+    exists to avoid.
+    """
+    t = report.translator
+    heading = name or esc(report.file.name)
+    lines = [
+        f"🔎 <b>{heading}</b>",
+        f"<i>{esc(f'{t.bytes(report.file.size_bytes)} · {report.file.file_type or chr(63)}')}</i>",
+    ]
 
     verdict = report.verdicts.get("originality")
-    if verdict is not None:
-        lines += [
-            "",
-            f"{ORIGINALITY_MARK[verdict.level]} <b>{esc(verdict.label(t))}</b>",
-            f"<i>{esc(t.get(f'bot.originality.{verdict.level.value}'))}</i>",
-        ]
+    if verdict is None or not badge:
+        return lines
+
+    lines += [
+        "",
+        f"{ORIGINALITY_MARK[verdict.level]} <b>{esc(verdict.label(t))}</b>",
+        f"<i>{esc(t.get(f'bot.originality.{verdict.level.value}'))}</i>",
+    ]
+    # A verdict with no evidence is an opinion. UNKNOWN is excluded because its
+    # reasons are recovery trivia, and GOOD because there is nothing to justify.
+    if verdict.level not in (VerdictLevel.GOOD, VerdictLevel.UNKNOWN) and verdict.reasons:
+        lines.append(f"<i>{esc(t.get('bot.verdict.because'))}</i>")
+        lines += [f"• {_hedged(finding, t)}" for finding in verdict.reasons[:3]]
     return lines
 
 
 def render_device(report: Report) -> list[str]:
-    t, device, capture = report.translator, report.device, report.capture
+    t, device = report.translator, report.device
     if not (device.make or device.model):
         return []
 
@@ -137,14 +198,16 @@ def render_device(report: Report) -> list[str]:
     modes = [key for key in device.capture_mode_keys if key != "photo"]
     if modes:
         second.append(" · ".join(t.get(f"mode.{key}") for key in modes))
-    if capture.focal_35mm:
-        second.append(
-            t.get("detail.equivalent", value=t.get("detail.mm", value=f"{capture.focal_35mm:g}"))
-        )
 
     lines = [head]
     if second:
         lines.append(esc(" · ".join(second)))
+    # The lens, which bot.help has always promised and this never showed. It is
+    # also the string that resolves the two-focal-lengths confusion by itself:
+    # "iPhone X back dual camera 4mm f/1.8".
+    lens = (device.lens_model or "").strip()
+    if lens and lens.lower() != device.label.lower():
+        lines.append(f"📷 {esc(lens[:60])}")
     if device.editor:
         lines.append(f"✏️ {esc(device.editor)}")
     return _block(t.get("bot.section.device"), lines)
@@ -184,17 +247,23 @@ def render_when(report: Report) -> list[str]:
     lines: list[str] = []
     if moment is not None:
         lines.append(f"<b>{esc(_format_date(moment, t))}</b>")
-        # The UTC offset is deliberately not shown. It is local time — which is
-        # what the reader expects — and "UTC+02:00" means nothing to most people
-        # while looking like it should. It stays in the full tag dump.
         when = t.describe_when(moment)
         if when:
             lines.append(esc(when))
     else:
         lines.append(f"<b>{esc(capture.taken)}</b>")
 
+    # The offset used to be withheld as meaningless, while the finding that says
+    # "this records which band of the world you were in" was filtered out of the
+    # leaks list as already shown here. It was shown nowhere. Said as what it
+    # costs rather than as "UTC+02:00", it is worth the line.
+    if capture.taken_offset:
+        lines.append(esc(t.get("bot.when.offset", offset=capture.taken_offset)))
+
     if capture.modified and capture.modified_matches_taken is False:
-        lines.append(f"✏️ {esc(t.get('bot.when.modified', value=capture.modified))}")
+        rewritten = parse_exif_datetime(capture.modified)
+        value = _format_date(rewritten, t) if rewritten else capture.modified
+        lines.append(f"✏️ {esc(t.get('bot.when.modified', value=value))}")
     return _block(t.get("bot.section.when"), lines)
 
 
@@ -223,7 +292,44 @@ def _render_when_from_filename(report: Report) -> list[str]:
     return _block(t.get("bot.section.when"), lines)
 
 
-def render_traces(report: Report) -> list[str]:
+def render_provenance(report: Report) -> str:
+    """The one line that has to come before a verdict shaped like failure.
+
+    Two findings explain an empty report and neither ever reached a user: that
+    the file came through a messenger, and that it is a screen capture rather
+    than a photograph. Both were computed, both translated, both discarded —
+    one because it is not in TRACE_FINDINGS, the other because render_traces
+    gives up whenever a capture time survives, and screenshots keep theirs.
+
+    Their severity is INFO, so this deliberately does not reuse the INFO filter
+    every other section applies. On these files they are the most important
+    sentence in the message.
+    """
+    t = report.translator
+    found = {finding.id: finding for finding in report.findings}
+
+    screenshot = found.get("recovery.screenshot")
+    if screenshot is not None:
+        return t.get("bot.note.screenshot")
+
+    stripped = found.get("platform.stripped")
+    if stripped is None or not report_is_stripped(report):
+        return ""
+    params = stripped.resolve_params(t)
+    # The finding carries variant="known"/"unknown": with no matching resize
+    # ceiling `platforms` is empty, and one string would read "the ceiling
+    # resize to" with a hole in the middle.
+    body = t.get(f"bot.note.stripped.{stripped.variant or 'unknown'}", **params)
+    return "\n".join(
+        (
+            f"🫥 <b>{t.get('bot.note.stripped.title')}</b>",
+            body,
+            t.get("bot.note.stripped.deliberate"),
+        )
+    )
+
+
+def render_traces(report: Report, *, skip: set[str] | None = None) -> list[str]:
     """What the compression says, on a file whose tags are gone.
 
     Only for that case. On a photo that still knows its own camera these would
@@ -236,12 +342,17 @@ def render_traces(report: Report) -> list[str]:
     and would swamp a chat message.
     """
     t = report.translator
-    if report.capture.taken or report.device.make or report.device.model:
+    # A named camera means the reader has real answers and these would be
+    # structural trivia buried under them. A capture time on its own does not:
+    # that is a screenshot or a stripped file, exactly the case where the
+    # compression is the only evidence there is.
+    if report.device.make or report.device.model:
         return []
+    skip = skip or set()
     lines = [
-        f"• {esc(finding.title(t))}"
+        f"• {_hedged(finding, t, floor=Confidence.LOW)}"
         for finding in report.sorted_findings
-        if finding.id in TRACE_FINDINGS
+        if finding.id in TRACE_FINDINGS and finding.id not in skip
     ]
     return _block(t.get("bot.section.traces"), lines)
 
@@ -259,6 +370,11 @@ def render_where(report: Report) -> list[str]:
     lines: list[str] = []
     if location.place:
         lines.append(f"<b>{esc(location.place)}</b>")
+    elif location.geocode_error:
+        # Otherwise a lookup that failed and a coordinate in the middle of the
+        # sea render identically: bare numbers and no explanation. Nominatim's
+        # own reason string is machine English and stays in the terminal report.
+        lines.append(esc(t.get("bot.where.unresolved")))
     lines.append(f"<code>{esc(location.decimal)}</code>")
 
     for note in (
@@ -317,12 +433,19 @@ def render_shot(report: Report) -> list[str]:
             f"ISO {capture.iso}" if capture.iso else None,
             f"f/{capture.f_number:g}" if capture.f_number else None,
             t.get("detail.seconds", value=capture.exposure_time) if capture.exposure_time else None,
-            t.get("detail.mm", value=f"{capture.focal_mm:g}") if capture.focal_mm else None,
         )
         if piece
     ]
     if exposure:
         lines.append(f"<code>{esc(' · '.join(exposure))}</code>")
+
+    # One focal-length line, not two. DEVICE said "28 mm equiv." and THE SHOT
+    # said "4 mm", four lines apart with nothing to connect them; to anyone who
+    # is not a photographer that is a contradiction. The nesting keeps the unit
+    # translatable — hard-coding "mm" here loses it in Ukrainian.
+    focal = _focal_line(report)
+    if focal:
+        lines.append(esc(focal))
 
     stabilised = report.raw.get("Apple:OISMode") is not None
     for note in (
@@ -346,6 +469,18 @@ def render_shot(report: Report) -> list[str]:
     return _block(t.get("bot.section.shot"), lines)
 
 
+def _focal_line(report: Report) -> str | None:
+    """The lens's reach, said once and in a way a non-photographer can read."""
+    t, capture = report.translator, report.capture
+    actual = t.get("detail.mm", value=f"{capture.focal_mm:g}") if capture.focal_mm else None
+    equivalent = t.get("detail.mm", value=f"{capture.focal_35mm:g}") if capture.focal_35mm else None
+    if actual and equivalent:
+        return t.get("detail.focal_pair", actual=actual, equivalent=equivalent)
+    if equivalent:
+        return t.get("detail.equivalent", value=equivalent)
+    return actual
+
+
 def render_exposure_risks(report: Report) -> list[str]:
     """What would leave with the file — named, not re-explained.
 
@@ -359,11 +494,30 @@ def render_exposure_risks(report: Report) -> list[str]:
             continue
         if finding.id in ALREADY_SHOWN or finding.severity is Severity.INFO:
             continue
-        key = f"bot.leak.{finding.id.split('.', 1)[1]}"
+        # A finding with a variant needs its variant's leak line, or a resize
+        # keeps being described as a crop.
+        stem = finding.id.split(".", 1)[1]
+        key = f"bot.leak.{stem}.{finding.variant}" if finding.variant else f"bot.leak.{stem}"
+        if not t.has(key):
+            key = f"bot.leak.{stem}"
         label = t.get(key, **finding.resolve_params(t)) if t.has(key) else finding.title(t)
         items.append(f"• {esc(label)}")
 
-    return _block(t.get("bot.section.leaks"), items)
+    # The head comes from what survived the filter, not from the raw verdict.
+    # Two of the owner's five samples score FAIR on a finding this section then
+    # hides, and printing "LOW EXPOSURE" directly above "nothing worth removing"
+    # is the message contradicting itself.
+    level = report.verdicts["privacy"].level if items else VerdictLevel.GOOD
+    if level not in EXPOSURE_MARK:  # privacy_verdict never returns UNKNOWN
+        level = VerdictLevel.GOOD
+    head = [
+        f"{EXPOSURE_MARK[level]} <b>{esc(t.get(f'verdict.privacy.{level.value}.label'))}</b>",
+        f"<i>{esc(t.get(f'bot.exposure.{level.value}'))}</i>",
+    ]
+    # Never vanish when there is nothing to list. "This file is safe to forward"
+    # and "I did not look" read identically when the section is simply absent —
+    # and the head alone says it, so no bullet repeats it.
+    return _block(t.get("bot.section.leaks"), head + items)
 
 
 def render_warnings(report: Report) -> list[str]:
@@ -381,23 +535,60 @@ def render_warnings(report: Report) -> list[str]:
 # -------------------------------------------------------------------- public
 
 
-def render_report(report: Report, *, source_note: str = "") -> str:
-    """Build the complete message body."""
-    parts = render_headline(report)
-    if source_note:
-        parts += ["", source_note]
+def render_report(
+    report: Report, *, source_note: str = "", name: str = "", footer: str = ""
+) -> str:
+    """Build the complete message body.
+
+    Two orderings matter here and both were wrong.
+
+    The lead note goes *above* the headline. It exists to explain why the report
+    is empty, and printing it under a "❔ UNKNOWN" badge means the reader meets
+    the failure first and the explanation second — which is the arrangement the
+    module docstring has always said it was avoiding.
+
+    And what the file gives away goes above the photographic detail. ISO and
+    aperture are the least actionable lines in the message; the exposure block
+    is the one that changes what the reader does next, and it was sitting on
+    line 34 of 35, below the colour profile.
+    """
+    t = report.translator
+    provenance = render_provenance(report)
+    lead = source_note or provenance
+
+    # A verdict printed under a note that has just explained why the file has
+    # nothing to judge is the same failure said twice, and the badge is the
+    # discouraging half. Suppressed for a provenance note — which covers the
+    # screenshot, whose surviving capture time would otherwise keep the badge
+    # alive — and for a compressed photo that arrived with nothing left.
+    badge = not (provenance or (source_note and report_is_stripped(report)))
+
+    parts: list[str] = []
+    if lead:
+        parts += [lead, ""]
+    parts += render_headline(report, name=name, badge=badge)
+
+    # Whatever the headline already justified must not be repeated as a trace:
+    # on a stripped file the verdict's reasons and the traces list are the same
+    # findings, and saying each thing once is the rule this module runs on.
+    shown = set()
+    verdict = report.verdicts.get("originality")
+    if badge and verdict and verdict.level not in (VerdictLevel.GOOD, VerdictLevel.UNKNOWN):
+        shown = {finding.id for finding in verdict.reasons[:3]}
 
     parts += (
         render_warnings(report)
         + render_device(report)
         + render_when(report)
         + render_where(report)
-        + render_shot(report)
-        + render_traces(report)
         + render_exposure_risks(report)
+        + render_shot(report)
+        + render_traces(report, skip=shown)
     )
+    if footer:
+        parts += ["", footer]
 
-    return _fit(parts, report.translator)
+    return _fit(parts, t)
 
 
 def _fit(parts: list[str], t: Translator) -> str:

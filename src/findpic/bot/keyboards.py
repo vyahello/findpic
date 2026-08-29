@@ -45,23 +45,39 @@ def language_keyboard(current: str) -> InlineKeyboardMarkup:
 
 
 def report_keyboard(
-    translator: Translator, token: str, *, offer_clean: bool, offer_backup: bool = False
+    translator: Translator,
+    token: str | None,
+    *,
+    offer_clean: bool,
+    offer_backup: bool = False,
 ) -> InlineKeyboardMarkup:
+    """The actions under a report.
+
+    ``token`` is None when the handle could not be stored. The report is
+    still worth sending — the analysis is done and the user is waiting — so
+    the buttons that need a handle are simply left off rather than offered
+    and then failing.
+    """
     builder = InlineKeyboardBuilder()
-    if offer_clean:
+    # Order is a safety property, not a layout preference. The irreversible
+    # button used to be the top one and the backup that undoes it sat below,
+    # which is the wrong way round for a tool whose whole subject is people
+    # losing metadata they cannot get back.
+    if token is not None:
+        if offer_backup:
+            builder.button(
+                text=translator.get("bot.button.backup"),
+                callback_data=AnalysisCallback(action="backup", token=token),
+            )
         builder.button(
-            text=translator.get("bot.button.clean"),
-            callback_data=AnalysisCallback(action="clean", token=token),
+            text=translator.get("bot.button.tags"),
+            callback_data=AnalysisCallback(action="tags", token=token),
         )
-    builder.button(
-        text=translator.get("bot.button.tags"),
-        callback_data=AnalysisCallback(action="tags", token=token),
-    )
-    if offer_backup:
-        builder.button(
-            text=translator.get("bot.button.backup"),
-            callback_data=AnalysisCallback(action="backup", token=token),
-        )
+        if offer_clean:
+            builder.button(
+                text=translator.get("bot.button.clean"),
+                callback_data=AnalysisCallback(action="clean", token=token),
+            )
     builder.button(
         text=translator.get("bot.button.language"),
         callback_data=LanguageCallback(code="menu"),

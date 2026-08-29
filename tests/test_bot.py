@@ -948,3 +948,120 @@ async def test_a_refused_file_gives_the_quota_slot_back(storage: Storage) -> Non
 async def test_a_refund_never_goes_negative(storage: Storage) -> None:
     await storage.refund(7)
     assert await rows(storage, "SELECT * FROM usage") == []
+
+
+# --------------------------------------------------- what the bot now shows
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_a_stripped_file_is_told_what_happened_to_it(samples_dir: Path) -> None:
+    """The two findings that explain an empty report never reached a user.
+
+    `platform.stripped` was not in TRACE_FINDINGS at all, so the owner's own
+    messenger-stripped photos came back as an UNKNOWN badge over one line of
+    JPEG-encoder trivia — and nothing said "ask the sender for the original".
+    """
+    target = samples_dir / "33.JPG"
+    if not target.exists():
+        pytest.skip("needs the owner's samples")
+    body = render_report(analyze(target, options=AnalysisOptions(geocode=False)))
+    t = Translator("en")
+    assert t.get("bot.note.stripped.title") in body
+    assert "1600" in body, "the size that gives the platform away should be named"
+    # The lead note comes first, above the verdict it exists to pre-empt.
+    assert body.index(t.get("bot.note.stripped.title")) < body.index("🔎")
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_a_screenshot_is_not_graded_as_a_photograph(samples_dir: Path) -> None:
+    """A screen capture keeps its capture time, so it kept its badge.
+
+    It was presented as "LIKELY ORIGINAL" with a WHEN block and a camera-shaped
+    THE SHOT — a verdict about a camera that never existed.
+    """
+    target = samples_dir / "22.jpeg"
+    if not target.exists():
+        pytest.skip("needs the owner's samples")
+    body = render_report(analyze(target, options=AnalysisOptions(geocode=False)))
+    assert Translator("en").get("bot.note.screenshot") in body
+    assert "LIKELY ORIGINAL" not in body
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_the_exposure_section_never_disappears(blank_jpeg: Path, gps_jpeg: Path) -> None:
+    """ "Safe to forward" and "I did not look" read identically when absent."""
+    t = Translator("en")
+    for path in (blank_jpeg, gps_jpeg):
+        body = render_report(analyze(path, options=AnalysisOptions(geocode=False)))
+        assert t.get("bot.section.leaks") in body, path.name
+
+    risky = render_report(analyze(gps_jpeg, options=AnalysisOptions(geocode=False)))
+    assert (
+        t.get("verdict.privacy.bad.label") in risky or t.get("verdict.privacy.poor.label") in risky
+    )
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_a_verdict_says_what_it_is_based_on(camera_jpeg: Path, tmp_path: Path) -> None:
+    """A conclusion with no evidence and no confidence is an opinion."""
+    import subprocess
+
+    target = tmp_path / "edited.jpg"
+    target.write_bytes(camera_jpeg.read_bytes())
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-Software=Adobe Photoshop 2024", str(target)],
+        check=False,
+        capture_output=True,
+    )
+    body = render_report(analyze(target, options=AnalysisOptions(geocode=False)))
+    assert Translator("en").get("bot.verdict.because") in body
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_nothing_is_said_twice_in_one_message(samples_dir: Path) -> None:
+    """The verdict's reasons and the traces list are the same findings.
+
+    Saying each thing once is the one rule this module runs on, and a stripped
+    file was the case where it broke.
+    """
+    target = samples_dir / "33.JPG"
+    if not target.exists():
+        pytest.skip("needs the owner's samples")
+    report = analyze(target, options=AnalysisOptions(geocode=False))
+    body = render_report(report)
+    for finding in report.findings:
+        title = finding.title(report.translator)
+        if title in body:
+            assert body.count(title) == 1, f"{finding.id} appears twice"
+
+
+def test_the_lens_the_help_text_promises_is_shown(camera_jpeg: Path) -> None:
+    """bot.help lists "lens" under DEVICE and render_device never read it."""
+    body = render_report(analyze(camera_jpeg, options=AnalysisOptions(geocode=False)))
+    assert "TestLens" in body
+
+
+def test_one_focal_length_line_not_two(camera_jpeg: Path) -> None:
+    """ "28 mm equiv." in one block and "4 mm" in another is a contradiction."""
+    body = render_report(analyze(camera_jpeg, options=AnalysisOptions(geocode=False)))
+    assert Translator("en").get("bot.section.device") in body
+    # Both numbers, in one sentence that explains their relationship.
+    assert "24" in body and "36" in body
+    assert body.count("mm") >= 2
+
+
+def test_the_backup_button_sits_above_the_one_that_cannot_be_undone() -> None:
+    from findpic.bot.keyboards import report_keyboard
+
+    keyboard = report_keyboard(Translator("en"), "token", offer_clean=True, offer_backup=True)
+    captions = [button.text for row in keyboard.inline_keyboard for button in row]
+    assert captions.index("💾 Backup the metadata") < captions.index("🧹 Send me a clean copy")
+
+
+def test_a_report_still_sends_when_the_handle_could_not_be_stored() -> None:
+    """The analysis is done and the user is waiting; a lost token is not fatal."""
+    from findpic.bot.keyboards import report_keyboard
+
+    keyboard = report_keyboard(Translator("en"), None, offer_clean=True, offer_backup=True)
+    captions = [button.text for row in keyboard.inline_keyboard for button in row]
+    assert captions == ["🌐 Language"]
