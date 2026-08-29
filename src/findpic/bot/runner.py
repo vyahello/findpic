@@ -190,6 +190,9 @@ async def run(config: Config) -> None:
             logger.error("archiving is configured but not working — %s", problem)
         else:
             logger.info("archiving to %s", config.archive_dir)
+        # So the report can resolve rel_path even when it is reading this
+        # database on somebody's laptop, a long way from the disk it describes.
+        await storage.remember_setting("archive_dir", str(config.archive_dir))
 
     session = build_session(config)
     bot = Bot(

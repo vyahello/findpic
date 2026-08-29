@@ -185,6 +185,15 @@ CREATE INDEX IF NOT EXISTS photos_at    ON photos (at);
 CREATE INDEX IF NOT EXISTS photos_user  ON photos (user_id, at);
 CREATE INDEX IF NOT EXISTS photos_event ON photos (event_id);
 CREATE INDEX IF NOT EXISTS photos_sha   ON photos (sha256);
+
+-- A handful of facts about the running bot that a reader of this database
+-- cannot otherwise know. `photos.rel_path` is relative to an archive root the
+-- bot knows from its environment and the report does not — so an operator who
+-- pulls this file to their laptop gets paths that resolve against nothing.
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 #: Bumped whenever SCHEMA gains a column on a table that already ships.
@@ -646,6 +655,19 @@ class Storage:
             "UPDATE events SET make = ?, model = ?, os = ?, sent_as = ?,"
             " file_type = ?, stripped = ? WHERE id = ?",
             (make, model, os_version, sent_as, file_type, int(stripped), event_id),
+        )
+        await self.db.commit()
+
+    async def remember_setting(self, key: str, value: str) -> None:
+        """Note something about this bot that the database cannot otherwise say.
+
+        Written on every start rather than once, so it tracks the configuration
+        instead of recording whatever it was the first time.
+        """
+        await self.db.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
         )
         await self.db.commit()
 

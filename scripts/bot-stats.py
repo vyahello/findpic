@@ -760,6 +760,12 @@ def collect(
             "Until then all that is kept is the language preference in `users`."
         )
 
+    # The bot records its own archive root here, so a report read on a laptop
+    # a long way from the disk still prints paths that mean something.
+    settings: dict[str, str] = {}
+    if "settings" in tables:
+        settings = {row["key"]: row["value"] for row in conn.execute("SELECT * FROM settings")}
+
     people = {int(row["user_id"]): dict(row) for row in conn.execute("SELECT * FROM people")}
     chosen = {
         int(row["user_id"]): row["language"] for row in conn.execute("SELECT * FROM users")
@@ -1040,6 +1046,7 @@ def collect(
 
     return {
         "generated_at": now.isoformat(timespec="seconds"),
+        "archive_dir": settings.get("archive_dir"),
         "window": {"since": since, "until": picks.until or now.isoformat(timespec="seconds")},
         "filters": picks.spoken(),
         "schema": {
@@ -1910,7 +1917,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="DIR",
         default=os.environ.get("ARCHIVE_DIR") or None,
-        help="archive root, to check kept files still exist (env: ARCHIVE_DIR)",
+        help="archive root, overriding what the bot recorded (env: ARCHIVE_DIR)",
     )
 
     narrow = parser.add_argument_group("what to count")
@@ -2035,7 +2042,14 @@ def main(argv: list[str] | None = None) -> int:
     limit = 15 if args.limit is None else max(0, args.limit)
     if len(args.user) == 1:
         return render_user(stats, args.user[0], ink, width=width)
-    render(stats, ink, source=source, limit=limit, width=width, archive_root=args.archive)
+    render(
+        stats,
+        ink,
+        source=source,
+        limit=limit,
+        width=width,
+        archive_root=args.archive or stats.get("archive_dir"),
+    )
     return 0
 
 

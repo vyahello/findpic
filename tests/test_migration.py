@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS events (
     file_type TEXT, stripped INTEGER);
 """
 
-TABLES = ("users", "usage", "analyses", "people", "events", "photos")
+TABLES = ("users", "usage", "analyses", "people", "events", "photos", "settings")
 
 
 def deployed(path: Path, rows: int = 1) -> Path:
@@ -183,5 +183,24 @@ async def test_the_upgraded_database_can_be_written_to(tmp_path: Path) -> None:
         handle = await storage.recall_analysis(token, 7)
         assert handle is not None and handle.photo_id == 5
         assert event_id
+    finally:
+        await storage.close()
+
+
+async def test_the_bot_records_where_the_archive_lives(tmp_path: Path) -> None:
+    """`photos.rel_path` is relative to a root only the bot knows.
+
+    Without this an operator who pulls the database to their laptop gets paths
+    that resolve against nothing, and the report cannot tell a file that was
+    evicted from one it simply cannot see.
+    """
+    storage = Storage(tmp_path / "bot.sqlite3")
+    await storage.connect()
+    try:
+        await storage.remember_setting("archive_dir", "/archive")
+        await storage.remember_setting("archive_dir", "/srv/photos")  # a redeploy
+        async with storage.db.execute("SELECT * FROM settings") as cursor:
+            rows = [dict(row) for row in await cursor.fetchall()]
+        assert rows == [{"key": "archive_dir", "value": "/srv/photos"}]
     finally:
         await storage.close()
