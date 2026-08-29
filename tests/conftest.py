@@ -38,6 +38,17 @@ def _exiftool(*args: str) -> None:
 
 
 @pytest.fixture(scope="session")
+def magick():
+    """Build an image, skipping the test when ImageMagick is not installed.
+
+    A fixture rather than an import: `from tests.conftest import _magick` works
+    from the repository root and nowhere else, because `tests` is not a package
+    and only pytest's rootdir insertion makes it look like one. It fails on CI.
+    """
+    return _magick
+
+
+@pytest.fixture(scope="session")
 def samples_dir() -> Path:
     """The owner's own photographs. Read-only, always — they are originals."""
     return SAMPLES

@@ -1487,24 +1487,20 @@ def test_a_bidi_override_cannot_reverse_the_report() -> None:
     assert esc("👨‍👩‍👧") == "👨‍👩‍👧"
 
 
-def test_a_one_pixel_image_does_not_claim_zero_megapixels(tmp_path: Path) -> None:
-    from tests.conftest import _magick
-
+def test_a_one_pixel_image_does_not_claim_zero_megapixels(tmp_path: Path, magick) -> None:
     tiny = tmp_path / "tiny.jpg"
-    _magick("-size", "1x1", "xc:red", str(tiny))
+    magick("-size", "1x1", "xc:red", str(tiny))
     body = render_report(analyze(tiny, options=AnalysisOptions(geocode=False)))
     assert "0.0 MP" not in body
 
 
-def test_a_file_with_no_colour_profile_says_nothing_about_one(tmp_path: Path) -> None:
+def test_a_file_with_no_colour_profile_says_nothing_about_one(tmp_path: Path, magick) -> None:
     """truncate(None) returned the word "None", which is truthy — so every
     stripped photograph ended its report with "Colour profile None"."""
     import subprocess
 
-    from tests.conftest import _magick
-
     plain = tmp_path / "plain.jpg"
-    _magick("-size", "40x40", "xc:gray", str(plain))
+    magick("-size", "40x40", "xc:gray", str(plain))
     subprocess.run(
         ["exiftool", "-overwrite_original", "-q", "-icc_profile:all=", str(plain)],
         check=False,
