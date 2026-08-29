@@ -406,8 +406,9 @@ impossible rather than defended against. The extension comes from the file's own
 first bytes, not from the claim — a file that crashes exiftool is exactly the one
 worth having on disk.
 
-Caps on total bytes, per person, per file and free space remaining; oldest
-evicted first; a retention window clamped to the analytics one, because past
+Caps on total bytes, per person, per file and free space remaining — a new
+picture is refused when one is reached, rather than an old one deleted to make
+room; a retention window clamped to the analytics one, because past
 that the sender's name is deleted and a photograph nobody can attribute is worse
 than no photograph. Nothing in the archive can fail an analysis: every outcome,
 including the refusals, is a row with a state, since an archive whose failures

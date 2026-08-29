@@ -157,7 +157,10 @@ class Config:
     #: Refuse to archive anything larger. Analysis still happens; only the copy
     #: is skipped, and the row says so.
     archive_max_file_bytes: int = 32 * 1024 * 1024
-    #: Total bytes of distinct pictures. Oldest are evicted past this.
+    #: Total bytes of distinct pictures. A new picture is refused past this
+    #: — nothing is deleted to make room, because deleting somebody's
+    #: photograph to store a stranger's is not a trade this should make on
+    #: its own. The retention window is what frees space.
     archive_max_total_bytes: int = 4 * 1024 * 1024 * 1024
     #: Per person, so one enthusiast cannot fill the disk on their own. Note
     #: that an admin bypasses the throttle and the daily quota entirely, so for

@@ -11,12 +11,14 @@ The audit tables (``people`` and ``events``) answer the operator's question
 bot's own privacy notice has to be true:
 
 * No message text is ever stored. An event records *that* somebody typed, never
-  what. No coordinates, no hashes, and no filename beyond its extension — the
-  full name lives only in ``analyses``, for the hours a report's buttons need to
-  find the file again, because it is what names the clean copy handed back.
-* Nothing is kept about the *picture* beyond the camera it names — make, model
-  and OS version. Where and when a photo was taken is the thing this bot warns
-  people about; harvesting it from their uploads would be indefensible.
+  what. No filename beyond its extension — the full name lives only in
+  ``analyses``, for the hours a report's buttons need to find the file again,
+  because it is what names the clean copy handed back.
+* When and where a photograph was taken are recorded only where the operator
+  has asked for it, or where the archive is keeping the whole file anyway — and
+  then as a day and a town, never a second and never a street. That is the
+  thing this bot warns people about, so the switch that governs it is separate
+  from the one that governs everything else, and ``/privacy`` says which is on.
 """
 
 from __future__ import annotations
@@ -374,12 +376,21 @@ class Storage:
                 return  # a new database has no history to preserve
 
         backup = self.path.with_name(f"{self.path.name}.v{await self._user_version()}")
-        if backup.exists():
+        # A zero-byte file is what a failed VACUUM leaves behind, and treating
+        # it as "the copy already exists" disarmed the snapshot on every later
+        # start with nothing in the log to say so.
+        if backup.is_file() and backup.stat().st_size:
             return
+        partial = backup.with_name(backup.name + ".partial")
         try:
-            await self.db.execute(f"VACUUM INTO '{backup}'")
+            partial.unlink(missing_ok=True)
+            # Bound, not interpolated: a DATABASE_PATH containing an apostrophe
+            # is a syntax error, and the snapshot was skipped in silence.
+            await self.db.execute("VACUUM INTO ?", (str(partial),))
+            partial.replace(backup)
             logger.info("kept a copy of the database before upgrading it: %s", backup)
         except Exception:  # noqa: BLE001 - sqlite < 3.27, or no room for a copy
+            partial.unlink(missing_ok=True)
             logger.warning("could not snapshot the database before upgrading", exc_info=True)
 
     async def _migrate(self) -> None:
@@ -728,40 +739,86 @@ class Storage:
         )
         await self.db.commit()
 
-    async def forget_everything(self, user_id: int) -> tuple[list[str], int]:
-        """Delete one person's record, and say what there was to delete.
+    async def archived_files(self, user_id: int) -> list[str]:
+        """Every kept picture belonging to one person."""
+        async with self.db.execute(
+            "SELECT rel_path FROM photos WHERE user_id = ? AND rel_path IS NOT NULL",
+            (user_id,),
+        ) as cursor:
+            return [row["rel_path"] for row in await cursor.fetchall()]
 
-        Returns the archived files to unlink and how many usage rows went. The
-        files are handed back rather than removed here — this class knows about
-        SQL and the archive knows about disks, and mixing them is how a delete
-        ends up half done in one of the two.
+    async def forget_everything(self, user_id: int, *, keep: set[str] | None = None) -> int:
+        """Delete one person's record and return how many rows went.
+
+        Called *after* the files have been unlinked, not before. Deleting the
+        rows first and then failing to unlink leaves a photograph on disk that
+        nothing in the database names — the same invariant the retention sweep
+        states in its own docstring, and the inverse of what /forget promises.
+
+        ``keep`` is the paths whose file could not be removed. Those rows stay,
+        because the row is the only handle anyone has on the file: losing it
+        makes the picture permanently unreachable rather than deleted.
 
         The `users` row survives, deliberately: it holds a language preference
         the person chose, and silently resetting it would be a worse surprise
         than keeping it. The notice says so rather than claiming "everything".
         """
-        async with self.db.execute(
-            "SELECT rel_path FROM photos WHERE user_id = ? AND rel_path IS NOT NULL",
-            (user_id,),
-        ) as cursor:
-            files = [row["rel_path"] for row in await cursor.fetchall()]
+        keep = keep or set()
+        removed = 0
+        for table in ("events", "photos"):
+            async with self.db.execute(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE user_id = ?", (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+            removed += int(row["n"]) if row else 0
 
-        async with self.db.execute(
-            "SELECT COUNT(*) AS n FROM events WHERE user_id = ?", (user_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-        events = int(row["n"]) if row else 0
+        if keep:
+            placeholders = ", ".join("?" * len(keep))
+            await self.db.execute(
+                f"DELETE FROM photos WHERE user_id = ? AND"
+                f" (rel_path IS NULL OR rel_path NOT IN ({placeholders}))",
+                (user_id, *keep),
+            )
+            removed -= len(keep)
+        else:
+            await self.db.execute("DELETE FROM photos WHERE user_id = ?", (user_id,))
 
         for statement in (
-            "DELETE FROM photos WHERE user_id = ?",
             "DELETE FROM events WHERE user_id = ?",
-            "DELETE FROM people WHERE user_id = ?",
             "DELETE FROM analyses WHERE user_id = ?",
             "DELETE FROM usage WHERE user_id = ?",
         ):
             await self.db.execute(statement, (user_id,))
+        # The person's own row goes only when nothing of theirs is left to
+        # attribute — a kept file with no name against it is worse than no file.
+        if not keep:
+            await self.db.execute("DELETE FROM people WHERE user_id = ?", (user_id,))
         await self.db.commit()
-        return files, events
+        return max(0, removed)
+
+    def expire_snapshots(self, keep_days: int) -> int:
+        """Delete pre-upgrade copies of the database past the retention window.
+
+        ``VACUUM INTO`` leaves a complete copy of everything the database held
+        before the schema changed — including the people and pictures that
+        /forget and the retention sweep have since deleted from the live file.
+        Nothing looked at it, so "I hold nothing else about you" and "kept for
+        90 days, then deleted" were both false for every account present when
+        the snapshot was taken, permanently. After the window nothing in it may
+        lawfully exist, so the rollback copy and the promise expire together.
+        """
+        if keep_days <= 0:
+            return 0
+        cutoff = dt.datetime.now(dt.timezone.utc).timestamp() - keep_days * 86400
+        removed = 0
+        for path in self.path.parent.glob(f"{self.path.name}.v*"):
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError as error:
+                logger.warning("could not remove the snapshot %s: %s", path, error)
+        return removed
 
     async def expired_archive_files(self, keep_days: int) -> list[tuple[int, str]]:
         """Kept pictures older than the window, as ``(photo_id, rel_path)``."""

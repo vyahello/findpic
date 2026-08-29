@@ -61,19 +61,25 @@ _LOSS_PROBES = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass
 class KeepRequest:
     """Ask for a copy to be kept, with the budget it has to fit inside.
 
     The two byte counts are read from the manifest by the caller rather than by
     the archive, because the archive is deliberately SQL-free — it knows about
     files and nothing else.
+
+    Not frozen, and that is load-bearing: ``stored`` is filled in the moment the
+    copy lands, so the caller still learns a file was kept even when the
+    analysis afterwards raises. Otherwise a picture the bot could not read would
+    sit on disk with no row naming it, and nothing would ever delete it.
     """
 
     user_id: int
     when: str
     held_bytes: int = 0
     user_bytes: int = 0
+    stored: Stored | None = None
 
 
 @dataclass(frozen=True)
@@ -135,7 +141,18 @@ class AnalysisService:
         """The shared geocoder for a language. Place names differ per language,
         so the cache has to be keyed by one."""
         if language not in self._geocoders:
-            self._geocoders[language] = Geocoder(enabled=True, language=language)
+            # Deliberately in the scratch directory, which is a tmpfs that dies
+            # with the container — not on the persistent volume. The cache holds
+            # Nominatim's full reply for every located photograph: a street
+            # address at four decimal places, keyed by coordinate. Nothing
+            # purges it, /forget cannot reach it, and it would exist even with
+            # ANALYTICS=0, whose notice says "never recorded: where and when a
+            # photo was taken". A cache that outlives the answer is a record.
+            self._geocoders[language] = Geocoder(
+                enabled=True,
+                language=language,
+                cache_file=self.config.work_dir / f"geocode-{language}.json",
+            )
         return self._geocoders[language]
 
     # ------------------------------------------------------------------ fetch
@@ -245,7 +262,7 @@ class AnalysisService:
         stored: Stored | None = None
         try:
             if keep is not None and self.archive is not None:
-                stored = await asyncio.to_thread(
+                keep.stored = stored = await asyncio.to_thread(
                     self.archive.store,
                     local,
                     user_id=keep.user_id,

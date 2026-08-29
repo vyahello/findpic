@@ -32,9 +32,9 @@ from ..exif import ExifTool, ExifToolError
 from ..i18n import LANGUAGE_NAMES, Translator
 from ..models import Category, Report, Severity
 from ..util import parse_exif_datetime
-from .archive import Stored
+from .archive import Archive, Stored
 from .config import Config
-from .filenames import IMAGE_SUFFIXES
+from .filenames import IMAGE_SUFFIXES, safe_suffix
 from .format import esc, render_report, render_tag_dump, report_is_stripped
 from .keyboards import (
     AnalysisCallback,
@@ -152,7 +152,12 @@ def privacy_notice(t: Translator, config: Config) -> str:
     hours = config.analysis_ttl_seconds // 3600
 
     if not config.analytics:
-        extra = t.get("bot.privacy.no_analytics")
+        # With a copy on disk there is still one row, holding the account and
+        # where the file sits — because /forget and the deletion clock cannot
+        # find it otherwise. Saying "nothing else is kept" would be false.
+        extra = t.get(
+            "bot.privacy.no_analytics.archive" if config.archiving else "bot.privacy.no_analytics"
+        )
     else:
         days = config.analytics_retention_days
         retention = (
@@ -163,15 +168,17 @@ def privacy_notice(t: Translator, config: Config) -> str:
         kept = t.get("bot.privacy.analytics")
         if config.keeps_capture:
             kept = f"{kept} {t.get('bot.privacy.capture')}"
-        # Once the whole file is kept, the old "never records where or when"
-        # promise is false — the photograph itself carries both, and the bot has
-        # it. Say that plainly rather than keeping a sentence that is true only
-        # of the columns.
-        never = (
-            t.get("bot.privacy.archive.never")
-            if config.archiving
-            else t.get("bot.privacy.never", ttl_hours=hours)
-        )
+        # Three cases, not two. Once the whole file is kept, "never records
+        # where or when" is false — the photograph carries both and the bot has
+        # it. And with capture recording on but no archive, the old sentence
+        # contradicted the bullet directly above it: one line said the day and
+        # the town are noted, the next said where and when are never recorded.
+        if config.archiving:
+            never = t.get("bot.privacy.archive.never")
+        elif config.keeps_capture:
+            never = t.get("bot.privacy.capture.never", ttl_hours=hours)
+        else:
+            never = t.get("bot.privacy.never", ttl_hours=hours)
         extra = f"{kept} {retention}\n{never}"
 
     notice = t.get(
@@ -269,9 +276,17 @@ async def handle_forget(
     if user is None:
         return
 
-    asked = _pending_forget.get(user.id, 0.0)
-    if time.monotonic() - asked > FORGET_WINDOW:
-        _pending_forget[user.id] = time.monotonic()
+    # None, not 0.0: monotonic() is uptime on Linux, so for the first minute
+    # after the machine boots a default of zero made the very first /forget look
+    # like a confirmation of a request nobody had made.
+    asked = _pending_forget.get(user.id)
+    # Prune while we are here; nothing else ever ages these out.
+    now = time.monotonic()
+    for waiting, when in list(_pending_forget.items()):
+        if now - when > FORGET_WINDOW:
+            _pending_forget.pop(waiting, None)
+    if asked is None or now - asked > FORGET_WINDOW:
+        _pending_forget[user.id] = now
         await message.answer(
             t.get("bot.forget.confirm", language=t.language_name()),
             disable_web_page_preview=True,
@@ -279,15 +294,35 @@ async def handle_forget(
         return
 
     _pending_forget.pop(user.id, None)
-    files, events = await storage.forget_everything(user.id)
-    if service.archive is not None:
-        for rel_path in files:
-            await asyncio.to_thread(service.archive.discard, rel_path)
 
-    if not files and not events:
+    files = await storage.archived_files(user.id)
+    # Built from the configuration rather than taken from the service, which
+    # holds one only when the bot started with archiving on. An operator who
+    # turned it off afterwards still has the pictures on disk, and those rows
+    # are the only thing that knows where.
+    store = service.archive
+    if store is None and config.archive_dir is not None:
+        store = Archive(config.archive_dir)
+
+    stuck: set[str] = set()
+    for rel_path in files:
+        if store is None:
+            # Nowhere to look. Keep the row: it is the only handle anyone has
+            # on that file, and deleting it makes the picture unreachable
+            # rather than deleted.
+            stuck.add(rel_path)
+            continue
+        if await asyncio.to_thread(store.discard, rel_path) is None:
+            stuck.add(rel_path)
+
+    records = await storage.forget_everything(user.id, keep=stuck)
+
+    if not files and not records:
         await message.answer(t.get("bot.forget.nothing"))
         return
-    await message.answer(t.get("bot.forget.done", photos=len(files), events=events))
+    await message.answer(t.get("bot.forget.done", photos=len(files) - len(stuck), events=records))
+    if stuck:
+        await message.answer(t.get("bot.forget.partial", len(stuck), count=len(stuck)))
 
 
 class MenuButton(BaseFilter):
@@ -492,6 +527,7 @@ async def _analyse_and_reply(
         report = analysis.report
     except ExifToolError as error:
         logger.warning("analysis failed for %s: %s", file_name, error)
+        await _keep_receipt(storage, message.from_user, keep)
         await _refuse(storage, event_id, message.from_user, "unreadable")
         await message.answer(t.get("bot.error.unreadable"))
         return
@@ -499,6 +535,7 @@ async def _analyse_and_reply(
         logger.exception("unexpected failure analysing %s", file_name)
         # Deliberately not refunded: a file that reliably crashes the analysis
         # would otherwise be an unlimited retry loop.
+        await _keep_receipt(storage, message.from_user, keep)
         await _quietly(storage.note_outcome(event_id, "failed"), "note failure")
         await message.answer(t.get("bot.error.internal"))
         return
@@ -509,6 +546,13 @@ async def _analyse_and_reply(
     # most detailed thing the bot records, so it has to obey that switch before
     # anything else does.
     photo_id = None
+    if not config.analytics:
+        # ANALYTICS=0 does not mean "keep the picture and lose the receipt".
+        # Without a row nothing can ever delete the file — not /forget, not the
+        # retention sweep — and it is invisible to the disk budget, while
+        # /privacy promises all three. Six columns, none of which describes the
+        # photograph: no camera, no verdict, no filename.
+        await _keep_receipt(storage, message.from_user, keep)
     if config.analytics:
         photo_id = await _quietly(
             storage.record_photo(
@@ -519,7 +563,12 @@ async def _analyse_and_reply(
                     chat_type=message.chat.type,
                     compressed=compressed,
                     mime_type=mime_type,
-                    claimed_name=None if compressed else file_name,
+                    # The extension, never the whole name. /privacy says the
+                    # full name lives for 24 hours in the button handle and
+                    # that the usage log keeps only its extension; this row
+                    # lives for the retention window, so it gets what was
+                    # promised and not more.
+                    claimed_name=None if compressed else safe_suffix(file_name, "") or None,
                     clean_offered=offer_clean,
                     duration_ms=int((time.monotonic() - started) * 1000),
                     capture=config.keeps_capture,
@@ -563,7 +612,7 @@ async def _analyse_and_reply(
         # A name the bot invented for a compressed photo means nothing to the
         # person who sent it — they never saw "telegram_photo_AgADBAADq6cx.jpg".
         name=esc(t.get("bot.headline.compressed_photo")) if compressed else "",
-        footer=_footer(t, config, quota),
+        footer=_footer(t, config, quota, analysis.stored),
     )
     await message.answer(
         body,
@@ -579,7 +628,9 @@ async def _analyse_and_reply(
     )
 
 
-def _footer(t: Translator, config: Config, quota: QuotaVerdict | None) -> str:
+def _footer(
+    t: Translator, config: Config, quota: QuotaVerdict | None, stored: Stored | None = None
+) -> str:
     """The two things worth saying under a report rather than inside it.
 
     The archive line is the only place the fact reaches somebody who never
@@ -587,12 +638,46 @@ def _footer(t: Translator, config: Config, quota: QuotaVerdict | None) -> str:
     keeps your photographs without ever mentioning it where you would see is
     not being straight with you.
     """
-    lines = [line for line in (_archive_footer(t, config), _quota_footer(t, quota)) if line]
+    lines = [line for line in (_archive_footer(t, stored), _quota_footer(t, quota)) if line]
     return "\n".join(lines)
 
 
-def _archive_footer(t: Translator, config: Config) -> str:
-    return f"<i>{esc(t.get('bot.archive.footer'))}</i>" if config.archiving else ""
+def _archive_footer(t: Translator, stored: Stored | None) -> str:
+    """Only when a copy really was kept.
+
+    Chosen from the configuration alone, this told everybody a copy was kept —
+    including the senders of every file the archive refused as too big, and of
+    every file that arrived while archiving was paused after a disk error. With
+    the shipped 32 MB archive ceiling against a 64 MB upload limit, that is a
+    whole band of ordinary files being told something untrue.
+    """
+    return f"<i>{esc(t.get('bot.archive.footer'))}</i>" if stored and stored.kept else ""
+
+
+async def _keep_receipt(storage: Storage, user, keep: KeepRequest | None) -> None:
+    """Record a copy that was kept for a file the analysis then failed on.
+
+    The archive runs before the analysis on purpose — a file that crashes
+    exiftool is the one most worth having on disk — so a failure leaves a
+    picture stored with no row naming it, invisible to /forget, to the
+    retention sweep and to the disk budget. This is the only thing that stops
+    it becoming permanent.
+    """
+    if keep is None or keep.stored is None or not keep.stored.kept or user is None:
+        return
+    await _quietly(
+        storage.record_photo(
+            PhotoRecord(
+                user_id=user.id,
+                at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                sha256=keep.stored.sha256,
+                bytes_kept=keep.stored.size,
+                state=keep.stored.state,
+                rel_path=keep.stored.rel_path,
+            )
+        ),
+        "record the kept copy",
+    )
 
 
 def _quota_footer(t: Translator, quota: QuotaVerdict | None) -> str:

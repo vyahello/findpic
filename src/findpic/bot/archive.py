@@ -44,6 +44,7 @@ import errno
 import hashlib
 import logging
 import os
+import re
 import shutil
 import time
 import uuid
@@ -92,6 +93,9 @@ BRANDS: dict[bytes, str] = {
     b"isom": ".mp4",
 }
 
+#: A plausible extension: a dot and a few alphanumerics, nothing else.
+_CLAIMED = re.compile(r"\.[A-Za-z0-9]{1,8}")
+
 #: How long to stop trying after a structural failure. Without it a full disk
 #: produces one stack trace per photograph and drowns the log.
 COOLDOWN_SECONDS = 300
@@ -118,6 +122,19 @@ class Stored:
     @property
     def kept(self) -> bool:
         return self.state in ("stored", "duplicate")
+
+
+def _safe_claim(suffix: str) -> str:
+    """A caller's suggested extension, or ``.bin``.
+
+    Validated here rather than trusted from the one caller that happens to
+    sanitise it today. Without this, bytes whose magic is unrecognised plus a
+    claim of "/../../../outside.sh" builds the traversal with
+    ``mkdir(parents=True)`` and lands the file before the containment check
+    further down ever runs — while this module's own docstring claims that is
+    impossible by construction. It is, now.
+    """
+    return suffix if _CLAIMED.fullmatch(suffix or "") else ".bin"
 
 
 def sniff(data: bytes, fallback: str = ".bin") -> str:
@@ -246,8 +263,18 @@ class Archive:
             return Stored(state="skipped_space", size=size, error="no room on the volume")
 
         digest, head = self._digest(source)
-        suffix = sniff(head, claimed_suffix or ".bin")
-        blob = self.root / OBJECTS / digest[:2] / digest[2:4] / f"{digest}{suffix}"
+        # The blob's name comes from the bytes and nothing else. Letting the
+        # sender's claimed extension into it meant one photograph occupied as
+        # many blobs as the sender chose names — sniff() falls through to the
+        # claim for anything whose magic it does not know, which is every raw
+        # format and WebP — so dedup missed every time, the disk cap
+        # under-counted, and discarding the visible name left full copies of
+        # the picture in objects/ that nothing referenced and nothing would
+        # ever delete. Retention and /forget both promise otherwise.
+        blob = self.root / OBJECTS / digest[:2] / digest[2:4] / f"{digest}{sniff(head)}"
+        # The claim survives only on the browsable name, where it is a hint to
+        # whatever opens the file and cannot affect what is stored where.
+        suffix = sniff(head, _safe_claim(claimed_suffix))
 
         duplicate = blob.exists()
         if not duplicate:
@@ -355,17 +382,24 @@ class Archive:
         root = self.root.resolve()
         return candidate if candidate.is_relative_to(root) and candidate.exists() else None
 
-    def discard(self, rel_path: str) -> int:
+    def discard(self, rel_path: str) -> int | None:
         """Remove one kept picture, and its bytes if nothing else references them.
 
-        Returns the bytes actually freed. The link count is what makes this
+        Returns the bytes freed, or None when the file is still there — which
+        /forget has to be able to tell apart from "there was nothing to remove",
+        because the two mean opposite things to the person who asked. The link count is what makes this
         safe: a photograph two people sent has two names and one inode, and
         deleting the inode when the first is evicted would take the second
         person's picture with it.
         """
-        link = self.resolve(rel_path)
+        try:
+            link = self.resolve(rel_path)
+        except ValueError:
+            # A NUL in the path reaches the C layer as a ValueError, which is
+            # not an OSError and so escapes the handler below.
+            return None
         if link is None:
-            return 0
+            return 0  # already gone, which is the outcome the caller wanted
         try:
             info = link.stat()
             blob = self._blob_for(link)
@@ -379,7 +413,7 @@ class Archive:
             return freed
         except OSError as error:
             logger.warning("could not remove %s: %s", rel_path, error)
-            return 0
+            return None
 
     def _blob_for(self, link: Path) -> Path | None:
         """The content-addressed copy a browsable name points at.
@@ -404,4 +438,8 @@ class Archive:
         bucket = self.root / OBJECTS / digest[:2] / digest[2:4]
         if not bucket.is_dir():
             return None
+        # The browsable name carries only the first eight hex characters, so the
+        # full digest cannot be reconstructed from it — hence the scan. It is
+        # unambiguous now that a blob's extension comes from its own bytes:
+        # before, one photograph could occupy several blobs under one prefix.
         return next((path for path in bucket.iterdir() if path.name.startswith(digest)), None)

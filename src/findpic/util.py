@@ -125,7 +125,15 @@ def coords_to_dms(latitude: float, longitude: float) -> str:
     return f"{to_dms(latitude, True)} {to_dms(longitude, False)}"
 
 
-def truncate(value: Any, limit: int = 120) -> str:
+def truncate(value: Any, limit: int = 120) -> str | None:
+    """Shorten a value for display, preserving "there was nothing here".
+
+    None in, None out. Stringifying it produced the literal word "None", which
+    is truthy — so every photograph with no colour profile ended its report
+    with "Colour profile None", in both languages.
+    """
+    if value is None:
+        return None
     text = value if isinstance(value, str) else str(value)
     text = text.replace("\n", "\\n").replace("\r", "\\r")
     return text if len(text) <= limit else text[: limit - 1] + "…"

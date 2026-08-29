@@ -151,17 +151,28 @@ async def cleanup_loop(storage: Storage, config: Config) -> None:
             # side: "keep the usage log forever" is a documented option, and it
             # must not silently disable the archive's own, separate clock.
             dropped = await purge_archive(storage, config)
+            aged = await asyncio.to_thread(
+                storage.expire_snapshots, config.analytics_retention_days
+            )
+            if aged:
+                logger.info("removed %s pre-upgrade database snapshots", aged)
             if removed:
                 logger.info("purged %s expired analysis handles", removed)
             if forgotten:
                 logger.info("forgot %s usage records past the retention window", forgotten)
             if dropped:
                 logger.info("deleted %s archived pictures past their retention window", dropped)
-            await asyncio.sleep(CLEANUP_INTERVAL)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             logger.exception("cleanup pass failed")
+        # Outside the try, so a failing pass waits like a successful one. Inside
+        # it, an exception skipped the sleep: a failure that yields spun this
+        # at a few hundred thousand passes a second, each writing a traceback,
+        # and one that does not yield — aiosqlite raises "Connection closed"
+        # before its first await — never returned to the event loop at all, so
+        # the bot stopped answering anybody until it was restarted.
+        await asyncio.sleep(CLEANUP_INTERVAL)
 
 
 async def run(config: Config) -> None:

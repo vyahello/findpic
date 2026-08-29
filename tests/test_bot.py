@@ -34,6 +34,7 @@ from findpic.bot.format import (
 from findpic.bot.handlers import privacy_notice
 from findpic.bot.keyboards import menu_labels
 from findpic.bot.middlewares import AccessMiddleware, AuditMiddleware, classify
+from findpic.bot.service import KeepRequest
 from findpic.bot.storage import Person, Storage
 from findpic.exif import ExifTool
 from findpic.i18n import Translator, available_languages
@@ -1226,9 +1227,12 @@ async def test_forget_deletes_the_pictures_and_the_record(storage: Storage) -> N
     )
     await storage.set_language(7, "uk")
 
-    files, events = await storage.forget_everything(7)
-    assert files == ["by-date/x/one.jpg"]
-    assert events == 1
+    # The files come out first, so the caller can unlink them before the rows
+    # that name them are deleted. The other order leaves a photograph on disk
+    # with nothing in the database pointing at it.
+    assert await storage.archived_files(7) == ["by-date/x/one.jpg"]
+    records = await storage.forget_everything(7)
+    assert records == 2, "one interaction and one picture"
     assert await rows(storage, "SELECT * FROM photos WHERE user_id = 7") == []
     assert await rows(storage, "SELECT * FROM people WHERE user_id = 7") == []
     # Somebody else's picture is untouched.
@@ -1388,15 +1392,122 @@ def test_metadata_cannot_add_lines_to_the_report(camera_jpeg: Path, tmp_path: Pa
     assert "\n51.501" not in body
 
 
-async def test_nothing_is_recorded_when_analytics_is_off(storage: Storage) -> None:
-    """ANALYTICS=0 is documented as "nothing but the language preference", and
-    /privacy tells users the same. The photo ledger is the most detailed thing
-    the bot writes, so it has to obey that switch before anything else does."""
-    import inspect
+async def test_a_kept_picture_always_has_a_row_naming_it(storage: Storage) -> None:
+    """ANALYTICS=0 does not mean "keep the picture and lose the receipt".
 
-    from findpic.bot import handlers
+    The switch is documented as "nothing but the language preference", so the
+    full ledger is correctly withheld — but the archive obeys a different
+    switch, and a file with no row is one that /forget cannot find, the
+    retention sweep cannot delete, and the disk budget cannot see. All three
+    are promised in the notice.
+    """
+    from findpic.bot.archive import Stored
+    from findpic.bot.handlers import _keep_receipt
 
-    source = inspect.getsource(handlers._analyse_and_reply)
-    guard = source.index("if config.analytics:")
-    call = source.index("storage.record_photo(")
-    assert guard < call, "the ledger write is not behind the analytics switch"
+    kept = Stored(state="stored", sha256="abc", size=1000, rel_path="by-date/x/a.jpg")
+    keep = KeepRequest(user_id=7, when="20260829T120000Z", stored=kept)
+
+    class _User:
+        id = 7
+
+    await _keep_receipt(storage, _User(), keep)
+    written = await rows(storage, "SELECT * FROM photos")
+    assert len(written) == 1
+    row = written[0]
+    assert (row["user_id"], row["rel_path"], row["state"]) == (7, "by-date/x/a.jpg", "stored")
+    # And nothing that describes the photograph itself.
+    assert row["make"] is None and row["model"] is None and row["originality"] is None
+    assert row["claimed_name"] is None
+
+
+async def test_no_receipt_for_a_picture_that_was_not_kept(storage: Storage) -> None:
+    from findpic.bot.archive import Stored
+    from findpic.bot.handlers import _keep_receipt
+
+    class _User:
+        id = 7
+
+    refused = Stored(state="skipped_big", size=99)
+    await _keep_receipt(
+        storage, _User(), KeepRequest(user_id=7, when="20260829T120000Z", stored=refused)
+    )
+    await _keep_receipt(storage, _User(), None)
+    assert await rows(storage, "SELECT * FROM photos") == []
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_the_block_that_matters_survives_a_huge_tag(gps_jpeg: Path, tmp_path: Path) -> None:
+    """The report printed the exact coordinates and then hid the warning.
+
+    A line that was large but still fitted ate the whole budget, so every
+    section after it vanished — and the last of those is the one telling the
+    reader what the file gives away. It failed at an intermediate size only,
+    which is why a 10 kB tag never showed it.
+    """
+    import subprocess
+
+    target = tmp_path / "huge.jpg"
+    target.write_bytes(gps_jpeg.read_bytes())
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", f"-Make={'M' * 3000}", str(target)],
+        check=False,
+        capture_output=True,
+    )
+    body = render_report(
+        analyze(target, options=AnalysisOptions(geocode=False)), footer="<i>kept</i>"
+    )
+    t = Translator("en")
+    assert t.get("bot.section.leaks") in body, "the exposure block was dropped"
+    assert "kept" in body, "the footer was dropped"
+    assert len(body) <= MESSAGE_LIMIT
+
+
+def test_truncation_never_leaves_a_header_without_its_body(gps_jpeg: Path) -> None:
+    """A section is kept or dropped whole, so a heading never stands alone."""
+    report = analyze(gps_jpeg, options=AnalysisOptions(geocode=False))
+    report.location.place = "P" * 3400
+    body = render_report(report)
+    t = Translator("en")
+    for header in (t.get("bot.section.where"), t.get("bot.section.shot")):
+        if header in body:
+            after = body.split(header, 1)[1].strip()
+            assert after and not after.startswith("<b>"), f"{header} kept without its body"
+
+
+def test_a_bidi_override_cannot_reverse_the_report() -> None:
+    """findpic's own rules call this pattern out as having no legitimate reason.
+
+    Printing it unchallenged in a report about deception would be odd.
+    """
+    from findpic.bot.format import esc
+
+    assert "‮" not in esc("‮gpj.exe")
+    assert esc("‮gpj.exe") == "gpj.exe"
+    # Emoji sequences must survive; their joiner is also category Cf.
+    assert esc("👨‍👩‍👧") == "👨‍👩‍👧"
+
+
+def test_a_one_pixel_image_does_not_claim_zero_megapixels(tmp_path: Path) -> None:
+    import subprocess
+
+    tiny = tmp_path / "tiny.jpg"
+    subprocess.run(["magick", "-size", "1x1", "xc:red", str(tiny)], check=True)
+    body = render_report(analyze(tiny, options=AnalysisOptions(geocode=False)))
+    assert "0.0 MP" not in body
+
+
+def test_a_file_with_no_colour_profile_says_nothing_about_one(tmp_path: Path) -> None:
+    """truncate(None) returned the word "None", which is truthy — so every
+    stripped photograph ended its report with "Colour profile None"."""
+    import subprocess
+
+    plain = tmp_path / "plain.jpg"
+    subprocess.run(["magick", "-size", "40x40", "xc:gray", str(plain)], check=True)
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-icc_profile:all=", str(plain)],
+        check=False,
+        capture_output=True,
+    )
+    report = analyze(plain, options=AnalysisOptions(geocode=False))
+    assert report.image.icc_profile is None
+    assert "None" not in render_report(report)

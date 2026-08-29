@@ -661,5 +661,11 @@
   "bot.forget.done": "Done. Deleted: {photos} kept pictures, {events} records of what you did.\n\nI hold nothing else about you except your language choice.",
   "bot.forget.nothing": "There is nothing of yours to delete — I hold no pictures and no usage record for your account.",
   "bot.command.forget": "Delete everything I hold about you",
-  "bot.archive.footer": "🗄 A copy of this file stays on the server. /privacy"
+  "bot.archive.footer": "🗄 A copy of this file stays on the server. /privacy",
+  "bot.forget.partial": {
+    "one": "One of your kept pictures could not be deleted — it is still on the server. Everything else is gone; send /forget again later and I will try that one again.",
+    "other": "{count} of your kept pictures could not be deleted — they are still on the server. Everything else is gone; send /forget again later and I will try them again."
+  },
+  "bot.privacy.no_analytics.archive": "• Nothing else about you is kept — except one line for the copy above: your Telegram user ID, when it arrived, and where it sits on disk, so that /forget and the deletion clock can find it again.",
+  "bot.privacy.capture.never": "• <b>Never recorded:</b> anything you type, the street a photo was taken on, or the minute it was taken. The day and the town go into the usage log, as the line above says. The short reference holds your file's name for {ttl_hours} hours so the buttons can find it again."
 }

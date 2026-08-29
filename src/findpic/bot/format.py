@@ -43,6 +43,9 @@ from ..recover import timestamp_from_filename
 from ..util import parse_exif_datetime
 
 #: Telegram's hard limit. We aim below it and fold the rest away.
+#: Characters that reorder everything printed after them.
+BIDI = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f")
+
 MESSAGE_LIMIT = 4096
 SAFE_LIMIT = 3500
 
@@ -112,6 +115,13 @@ def esc(value: object) -> str:
     text = str(value)
     if any(character in text for character in "\n\r\t\v\f"):
         text = " ".join(text.split())
+    # Bidirectional overrides reverse everything after them, so "‮gpj.exe"
+    # renders as "exe.jpg". findpic's own structural rules call that pattern out
+    # as having no legitimate reason; printing it unchallenged in a report about
+    # deception would be an odd thing to do. Only these — stripping all of
+    # category Cf would take the joiners out of emoji sequences.
+    if any(character in text for character in BIDI):
+        text = "".join(character for character in text if character not in BIDI)
     return escape(text, quote=False)
 
 
@@ -149,7 +159,7 @@ def _hedged(finding: Finding, t: Translator, *, floor: Confidence = Confidence.M
     titled "what the file still shows", where every line is a reading of the
     compression, only a genuine guess is worth marking.
     """
-    text = esc(finding.title(t))
+    text = esc(finding.title(t)[:200])
     key = HEDGE.get(finding.confidence)
     if key is None or finding.confidence.rank > floor.rank:
         return text
@@ -203,9 +213,12 @@ def render_device(report: Report) -> list[str]:
     if not (device.make or device.model):
         return []
 
-    head = esc(device.label)
+    # Capped where they become a line. Each is attacker-controlled and
+    # unbounded, and a three-thousand-character camera name is what pushed the
+    # exposure block out of the message entirely.
+    head = esc(device.label[:70])
     if device.os:
-        head = f"{head} · {esc(device.os)}"
+        head = f"{head} · {esc(device.os[:40])}"
 
     second: list[str] = []
     # "Mode: Photo" on a photo bot says nothing; portrait or ProRAW does.
@@ -223,7 +236,7 @@ def render_device(report: Report) -> list[str]:
     if lens and lens.lower() != device.label.lower():
         lines.append(f"📷 {esc(lens[:60])}")
     if device.editor:
-        lines.append(f"✏️ {esc(device.editor)}")
+        lines.append(f"✏️ {esc(device.editor[:70])}")
     return _block(t.get("bot.section.device"), lines)
 
 
@@ -432,7 +445,9 @@ def render_shot(report: Report) -> list[str]:
     lines: list[str] = []
 
     geometry = []
-    if image.megapixels:
+    # Guarded on the rounded value: a 1x1 has megapixels of 1e-06, which is
+    # truthy, and rendered as "0.0 MP".
+    if image.megapixels and round(image.megapixels, 1) > 0:
         geometry.append(t.get("detail.megapixels", value=f"{image.megapixels:.1f}"))
     if image.dimensions:
         geometry.append(f"{image.width} × {image.height}")
@@ -521,7 +536,8 @@ def render_exposure_risks(report: Report) -> list[str]:
     # Two of the owner's five samples score FAIR on a finding this section then
     # hides, and printing "LOW EXPOSURE" directly above "nothing worth removing"
     # is the message contradicting itself.
-    level = report.verdicts["privacy"].level if items else VerdictLevel.GOOD
+    verdict = report.verdicts.get("privacy")
+    level = verdict.level if (items and verdict) else VerdictLevel.GOOD
     if level not in EXPOSURE_MARK:  # privacy_verdict never returns UNKNOWN
         level = VerdictLevel.GOOD
     head = [
@@ -623,24 +639,47 @@ def _fit(parts: list[str], t: Translator) -> str:
     if len(message) <= SAFE_LIMIT:
         return message
 
-    # Skip what does not fit rather than stopping at it. One pathological tag —
-    # a 4 kB place name, a colour profile with a novel in it — would otherwise
-    # take every section below it down as collateral, including the one line
-    # that tells the reader what the file gives away.
+    # Budgeted by block, not by line. Skipping single lines left a section's
+    # header on screen with its body gone, and — worse — a line that was large
+    # but still fitted ate the whole budget, so everything after it vanished
+    # silently. That dropped the one block the reader most needs: on a file
+    # with a 3 kB camera name the report printed the exact coordinates and then
+    # suppressed "WHAT THIS GIVES AWAY" entirely.
     kept: list[str] = []
     size = 0
     dropped = False
-    for line in parts:
-        if size + len(line) + 1 > SAFE_LIMIT:
+    for block in _blocks(parts):
+        cost = sum(len(line) + 1 for line in block)
+        if size + cost > SAFE_LIMIT:
             dropped = True
             continue
-        kept.append(line)
-        size += len(line) + 1
+        kept.extend(block)
+        size += cost
 
-    message = "\n".join(kept)
+    message = "\n".join(kept).strip("\n")
     if dropped:
         message += "\n\n" + t.get("bot.truncated")
     return message if len(message) <= MESSAGE_LIMIT else t.get("bot.truncated")
+
+
+def _blocks(parts: list[str]) -> list[list[str]]:
+    """Group the rendered lines into the sections they came from.
+
+    Every section this module emits begins with a blank line, which is what
+    makes the split possible without threading structure through every
+    renderer.
+    """
+    groups: list[list[str]] = []
+    current: list[str] = []
+    for line in parts:
+        if line == "" and current:
+            groups.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        groups.append(current)
+    return groups
 
 
 def render_tag_dump(report: Report) -> str:
