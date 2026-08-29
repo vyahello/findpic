@@ -22,3 +22,7 @@ samples/
 
 # Bot secrets, written by the deploy workflow. Never committed.
 deploy/.env
+
+# Personal notes. These hold real server addresses and ports, so they must
+# never reach a public repository.
+*.local.md
