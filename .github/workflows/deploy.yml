@@ -40,7 +40,7 @@ jobs:
         env:
           SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_SSH_PORT: ${{ vars.VPS_SSH_PORT || '22' }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT || '22' }}
           HOST_KEY: ${{ secrets.VPS_SSH_HOST_KEY }}
         run: |
           set -euo pipefail
@@ -60,9 +60,11 @@ jobs:
         env:
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
-          # sshd does not always listen on 22, and a hardcoded port fails the
-          # deploy with "connection refused" and nothing else to go on.
-          VPS_SSH_PORT: ${{ vars.VPS_SSH_PORT || '22' }}
+          # A secret rather than a variable, and not because the number is
+          # dangerous on its own: GitHub masks a secret in the workflow log and
+          # prints a variable verbatim. On a public repository that put the
+          # port in a public log beside a masked VPS_HOST, on every deploy.
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT || '22' }}
           VPS_APP_DIR: ${{ secrets.VPS_APP_DIR }}
           TARGET_SHA: ${{ steps.target.outputs.sha }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -185,9 +187,11 @@ jobs:
         env:
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
-          # sshd does not always listen on 22, and a hardcoded port fails the
-          # deploy with "connection refused" and nothing else to go on.
-          VPS_SSH_PORT: ${{ vars.VPS_SSH_PORT || '22' }}
+          # A secret rather than a variable, and not because the number is
+          # dangerous on its own: GitHub masks a secret in the workflow log and
+          # prints a variable verbatim. On a public repository that put the
+          # port in a public log beside a masked VPS_HOST, on every deploy.
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT || '22' }}
           VPS_APP_DIR: ${{ secrets.VPS_APP_DIR }}
         run: |
           set -euo pipefail

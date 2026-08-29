@@ -159,22 +159,13 @@ These four already exist and are used by the deploy workflow:
 | `ADMIN_USER_IDS` | Comma-separated Telegram IDs exempt from throttling and the daily quota. Put your own ID here — [@userinfobot](https://t.me/userinfobot) will tell you what it is. |
 | `ALLOWED_USER_IDS` | Set this to make the bot **private**. Only these IDs may use it; everyone else is told so and shown their own ID. Leave unset to keep it public. |
 | `VPS_SSH_HOST_KEY` | Pins the server's SSH host key instead of trusting it on first use. Get it with `ssh-keyscan -p <port> -H <host>`. |
-
-### Optional repository variables
-
-Variables rather than secrets — none of these is sensitive, and seeing their
-values in a workflow log is what you want when a deploy goes wrong.
-
-| Variable | Effect |
-|---|---|
-| `VPS_SSH_PORT` | The port sshd listens on. Defaults to 22; set it if yours is elsewhere, or every deploy fails with `connection refused` and nothing else to go on. A variable rather than a secret because GitHub will not mask it in a log either way — if you would rather it were not readable at all, make it a secret and reference it as `secrets.VPS_SSH_PORT`. |
-| `ARCHIVE_DIR` | Set to `/archive` to keep a copy of every picture the bot receives, under `~/findpic-archive` on the server. Empty (the default) keeps none. **Turning this on rewrites what `/privacy` tells your users, in both languages** — read it once afterwards. |
-| `ANALYTICS` | `0` stops the bot recording who used it. Default `1`. |
-| `ANALYTICS_RETENTION_DAYS` | How long that record is kept. `0` keeps it forever, which is a decision rather than a default. |
+| `VPS_SSH_PORT` | The port sshd listens on. Defaults to 22; set it if yours is elsewhere, or every deploy fails with `connection refused` and nothing else to go on. A **secret** rather than a variable: on a public repository GitHub prints a variable into the workflow log verbatim and masks a secret, so a variable would publish the port on every deploy. |
 
 ### Optional variables
 
-Under the **Variables** tab (not secrets — these are not sensitive):
+Under the **Variables** tab. A variable is printed into the workflow log
+verbatim, so anything that should not be readable belongs in **Secrets**
+instead — see `VPS_SSH_PORT` above.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -183,6 +174,9 @@ Under the **Variables** tab (not secrets — these are not sensitive):
 | `MAX_FILE_MB` | `64` | Largest accepted file. Up to 2000 with the local API server. |
 | `BOT_DEFAULT_LANGUAGE` | `en` | Fallback when the user's client language is neither `en` nor `uk`. |
 | `LOG_LEVEL` | `INFO` | Leave at INFO — `DEBUG` can put file identifiers in the logs. |
+| `ANALYTICS` | `1` | `0` stops the bot recording who used it. |
+| `ANALYTICS_RETENTION_DAYS` | `90` | How long that record is kept. `0` keeps it forever, which is a decision rather than a default. |
+| `ARCHIVE_DIR` | empty | Set to `/archive` to keep a copy of every picture the bot receives, under `~/findpic-archive` on the server. **Turning this on rewrites what `/privacy` tells your users, in both languages** — read it once afterwards. |
 
 ---
 
