@@ -11,7 +11,9 @@ The audit tables (``people`` and ``events``) answer the operator's question
 bot's own privacy notice has to be true:
 
 * No message text is ever stored. An event records *that* somebody typed, never
-  what. Likewise no filename, no ``file_id``, no coordinates, no hashes.
+  what. No coordinates, no hashes, and no filename beyond its extension — the
+  full name lives only in ``analyses``, for the hours a report's buttons need to
+  find the file again, because it is what names the clean copy handed back.
 * Nothing is kept about the *picture* beyond the camera it names — make, model
   and OS version. Where and when a photo was taken is the thing this bot warns
   people about; harvesting it from their uploads would be indefensible.
@@ -73,8 +75,8 @@ CREATE TABLE IF NOT EXISTS people (
     events        INTEGER NOT NULL DEFAULT 0
 );
 
--- One row per interaction. Deliberately narrow: no text, no filenames, no
--- file_ids, nothing that identifies a picture.
+-- One row per interaction. Deliberately narrow: no message text, no file_ids,
+-- and of a filename only its extension.
 CREATE TABLE IF NOT EXISTS events (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id   INTEGER NOT NULL,
@@ -239,6 +241,25 @@ class Storage:
         )
         await self.db.commit()
         return QuotaVerdict(allowed=True, used=used + 1, limit=daily_quota)
+
+    async def refund(self, user_id: int) -> None:
+        """Give back a quota slot the bot itself decided not to spend.
+
+        The throttle charges before the handler has seen the file, which is the
+        right order — the check has to be atomic with the spend or two photos in
+        one album both slip through. The consequence is that a file the bot then
+        refuses as too big, as not an image, or as unreadable has already cost
+        the sender one of their analyses for the day. Refunding is cheaper than
+        restructuring, and it keeps the count the user is shown honest.
+
+        Not called for a crash: a file that reliably breaks the analysis would
+        otherwise be an unlimited retry loop.
+        """
+        await self.db.execute(
+            "UPDATE usage SET count = MAX(0, count - 1) WHERE user_id = ? AND day = ?",
+            (user_id, _today()),
+        )
+        await self.db.commit()
 
     # -------------------------------------------------------------- handles
 

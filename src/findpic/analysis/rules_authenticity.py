@@ -15,7 +15,7 @@ from collections.abc import Iterable
 
 from ..models import Category, Confidence, Finding, Severity
 from ..tables import RETOUCH_EDITORS, match_jpeg_digest
-from ..util import parse_exif_datetime, truncate
+from ..util import compare_geometry, parse_exif_datetime, truncate
 from .context import Context
 from .registry import rule
 
@@ -130,19 +130,11 @@ def dimension_mismatch(context: Context) -> Iterable[Finding]:
     exif_height = meta.int("ExifIFD:ExifImageHeight")
     real_width = meta.int("File:ImageWidth")
     real_height = meta.int("File:ImageHeight")
-    if not all((exif_width, exif_height, real_width, real_height)):
+    change = compare_geometry((exif_width, exif_height), (real_width, real_height))
+    # None means they agree; "rotate" is a lossless orientation swap, not an edit.
+    if change in (None, "rotate"):
         return
-    if (exif_width, exif_height) == (real_width, real_height):
-        return
-    # An orientation swap is a lossless rotate, not a crop.
-    if (exif_width, exif_height) == (real_height, real_width):
-        return
-
-    # Same aspect ratio means it was scaled down; a different one means the frame
-    # itself changed, which is the more interesting claim.
-    original_ratio = exif_width / exif_height
-    current_ratio = real_width / real_height
-    resized = abs(original_ratio - current_ratio) / original_ratio < 0.01
+    resized = change == "resize"
 
     yield Finding(
         id="authenticity.dimension_mismatch",
@@ -200,9 +192,14 @@ def progressive_jpeg(context: Context) -> Iterable[Finding]:
 
 @rule("camera_without_makernotes", Category.AUTHENTICITY, order=30)
 def camera_without_makernotes(context: Context) -> Iterable[Finding]:
-    """A named camera with no MakerNote block is a re-save or a rewrite."""
+    """A named camera with no MakerNote block is a re-save or a rewrite.
+
+    Only for files that have an Exif block at all. An MP4 or a MOV names its
+    camera in QuickTime atoms and has no ExifIFD to have lost — accusing it of
+    a re-save is accusing it of losing something it never had a place to keep.
+    """
     device = context.device
-    if not context.has_camera_identity or device.has_makernotes:
+    if not context.has_exif or not context.has_camera_identity or device.has_makernotes:
         return
     yield Finding(
         id="authenticity.no_makernotes",
@@ -249,10 +246,20 @@ def no_exif_at_all(context: Context) -> Iterable[Finding]:
 
 @rule("thin_camera_claim", Category.AUTHENTICITY, order=41)
 def thin_camera_claim(context: Context) -> Iterable[Finding]:
-    """Modern devices write timing and lens detail; a bare claim is suspicious."""
+    """Modern devices write timing and lens detail; a bare claim is suspicious.
+
+    Every probe below is an ``ExifIFD:`` tag, so this can only mean anything
+    about a file that has an ExifIFD. A video has none, and used to collect two
+    accusations for it.
+    """
     device = context.device
     meta = context.meta
-    if not context.has_camera_identity or device.has_makernotes or device.editor:
+    if (
+        not context.has_exif
+        or not context.has_camera_identity
+        or device.has_makernotes
+        or device.editor
+    ):
         return
 
     missing = [
@@ -294,6 +301,48 @@ def gps_time_disagrees(context: Context) -> Iterable[Finding]:
     gap = abs((taken.date() - gps_day).days)
     if gap <= 1:
         return
+
+    # A phone that could not see satellites falls back to a cell or wifi fix and
+    # carries the timestamp of the last real one. That is ordinary, and it used
+    # to be enough on its own to declare the whole file forged: this rule is the
+    # only member of CONTRADICTION_IDS, which short-circuits every other signal
+    # and lands the verdict on "the metadata contradicts itself — do not trust
+    # it". A four-day-old cached fix should not do that.
+    #
+    # Two conditions, both required, and the discriminators were already being
+    # extracted and never used. The GPS clock must be *behind* the shutter (a
+    # cached fix can only be older, never newer), and the recorded accuracy or
+    # the processing method must say this was not a satellite lock.
+    accuracy = context.location.accuracy_m
+    method = (context.location.processing_method or "").upper()
+    stale = gps_day < taken.date() and (
+        (accuracy is not None and accuracy > 30) or (method and "GPS" not in method)
+    )
+    if stale:
+        yield Finding(
+            id="authenticity.gps_fix_is_stale",
+            category=Category.AUTHENTICITY,
+            severity=Severity.NOTICE,
+            confidence=Confidence.MEDIUM,
+            params={
+                "gap": gap,
+                "gps_date": gps_day,
+                "accuracy": f"{accuracy:g}" if accuracy is not None else method.lower(),
+            },
+            evidence={
+                "DateTimeOriginal": capture.taken,
+                "GPSDateStamp": gps_date,
+                "GPSHPositioningError": accuracy,
+                "GPSProcessingMethod": context.location.processing_method,
+            },
+            weight=5,
+        )
+        return
+
+    # No accuracy and no method recorded is the common case on Apple files. Fall
+    # back to the old behaviour rather than going silent: a real forgery must
+    # still be caught, and absence of the discriminator is not absence of the
+    # problem.
     yield Finding(
         id="authenticity.gps_time_disagrees",
         category=Category.AUTHENTICITY,

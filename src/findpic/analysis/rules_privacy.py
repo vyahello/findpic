@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from ..models import Category, Confidence, Finding, Severity
-from ..util import truncate
+from ..util import compare_geometry, truncate
 from .context import Context
 from .registry import rule
 
@@ -204,7 +204,9 @@ def named_people(context: Context) -> Iterable[Finding]:
         category=Category.PRIVACY,
         severity=Severity.CRITICAL,
         confidence=Confidence.HIGH,
-        params={"names": ", ".join(named[:5])},
+        # Per name, not just per list: five names are capped, the length of
+        # each one is not, and every one of them is attacker-controlled.
+        params={"names": ", ".join(truncate(name, 40) or "" for name in named[:5])},
         evidence={"names": named},
         weight=30,
         remediation="exiftool -xmp:all= -o clean_copy.jpg photo.jpg",
@@ -344,30 +346,33 @@ def embedded_thumbnail(context: Context) -> Iterable[Finding]:
     if not image.has_thumbnail:
         return
 
-    # The leak only bites when the main image was resized or cropped after the
-    # thumbnail was written, so check that here rather than always crying wolf.
+    # The leak only bites when the main image changed after the thumbnail was
+    # written — and *how* it changed decides what the preview can still show.
+    # This used to test only "the sizes differ", which reported a crop on every
+    # plain downscale: the same four integers made one line of the report say
+    # "resized" and the next say "the preview may still show what was cropped
+    # out". A resize leaves the framing alone, so the preview holds nothing the
+    # picture does not; only a crop hides something.
     meta = context.meta
     exif_size = (meta.int("ExifIFD:ExifImageWidth"), meta.int("ExifIFD:ExifImageHeight"))
     real_size = (meta.int("File:ImageWidth"), meta.int("File:ImageHeight"))
-    resized = (
-        all(exif_size)
-        and all(real_size)
-        and exif_size != real_size
-        and exif_size != real_size[::-1]
-    )
+    change = compare_geometry(exif_size, real_size)
 
-    if resized:
+    if change in ("crop", "resize"):
+        cropped = change == "crop"
         yield Finding(
             id="privacy.stale_thumbnail",
             category=Category.PRIVACY,
-            severity=Severity.WARNING,
+            severity=Severity.WARNING if cropped else Severity.NOTICE,
             confidence=Confidence.MEDIUM,
+            variant=change,
+            detail_variant=change,
             evidence={
                 "ThumbnailLength": image.thumbnail_size,
                 "ExifImageSize": exif_size,
                 "ActualSize": real_size,
             },
-            weight=18,
+            weight=18 if cropped else 6,
             remediation="exiftool -thumbnailimage= -o clean_copy.jpg photo.jpg",
         )
         return

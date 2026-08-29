@@ -383,11 +383,32 @@ def never_had_it(context: Context) -> Iterable[Finding]:
     if not (from_tag or from_name):
         return
 
+    # A camera's preview inside the file contradicts the claim outright, and
+    # this is the only place the contradiction shows up. Both signals above are
+    # free text somebody can write: `exiftool -UserComment=Screenshot` on a real
+    # photograph was enough to make findpic assert, at HIGH confidence, that the
+    # picture had never had a camera — while the same report said its
+    # compression tables belonged to one.
+    #
+    # The discriminator has to be the *preview*, not the main image: a genuine
+    # phone screenshot is itself compressed by the phone, so its main image
+    # looks device-encoded too. What it does not have is an embedded camera
+    # thumbnail.
+    if (
+        context.thumbnail is not None
+        and context.thumbnail.luma is not None
+        and context.thumbnail.luma.repeats_first_row
+    ):
+        return
+
     yield Finding(
         id="recovery.screenshot",
         category=Category.PLATFORM,
         severity=Severity.INFO,
-        confidence=Confidence.HIGH if from_tag else Confidence.MEDIUM,
+        # HIGH only when the name and the tag agree. The tag alone is writable
+        # by anyone, and this rule already returns early when a location is
+        # present — so stripping the GPS is all it would take to buy the claim.
+        confidence=Confidence.HIGH if (from_tag and from_name) else Confidence.MEDIUM,
         params={},
         evidence={"UserComment": marker or None, "filename": context.file.name},
     )

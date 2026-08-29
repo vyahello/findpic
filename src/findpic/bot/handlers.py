@@ -16,7 +16,9 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
+from collections.abc import Awaitable
 from pathlib import Path
+from typing import TypeVar
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatAction
@@ -27,6 +29,7 @@ from ..exif import ExifTool, ExifToolError
 from ..i18n import LANGUAGE_NAMES, Translator
 from ..models import Category, Report, Severity
 from .config import Config
+from .filenames import IMAGE_SUFFIXES
 from .format import esc, render_report, render_tag_dump
 from .keyboards import (
     AnalysisCallback,
@@ -37,10 +40,64 @@ from .keyboards import (
     menu_labels,
     report_keyboard,
 )
-from .service import AnalysisService
+from .service import AnalysisService, CleanResult
 from .storage import Storage
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+async def _quietly(coro: Awaitable[T], what: str, default: T | None = None) -> T | None:
+    """Await something whose failure must not cost the user their answer.
+
+    Everything the bot writes down about a request — the usage record, the
+    button handle, the photo ledger — is bookkeeping. An analysis that
+    succeeded and then died on an UPDATE leaves the user with "Something broke
+    on my side" for work that was done and paid for. The audit middleware has
+    always swallowed its own failures for this reason (middlewares.py); this
+    puts the media path on the same footing, and routes every such await
+    through one place so the next one added is guarded by construction.
+    """
+    try:
+        return await coro
+    except Exception:  # noqa: BLE001 - deliberate: see above
+        logger.exception("could not %s", what)
+        return default
+
+
+def compressed_note(t: Translator) -> str:
+    """Why an empty report is not a broken bot, and how to get a real one.
+
+    NOT escaped, and that is not an oversight. ``esc()`` belongs on a catalogue
+    string only when *metadata* is interpolated into it — that is what
+    neutralises an Artist tag set to ``</b><script>``. These two strings take no
+    parameters and carry their own markup, so escaping them printed the tags to
+    the reader: for months everyone who sent a picture the ordinary way was told
+    to send it "as a &lt;b&gt;file&lt;/b&gt;", which is the single instruction
+    the whole bot depends on.
+    """
+    return "\n".join(
+        (
+            f"⚠️ <b>{t.get('bot.note.compressed.title')}</b>",
+            t.get("bot.note.compressed.body"),
+        )
+    )
+
+
+async def _refuse(storage: Storage, event_id: int | None, user, reason: str) -> None:
+    """Record why the bot declined, and give back the quota slot it charged.
+
+    ThrottleMiddleware spends a slot before the handler has looked at the file,
+    so a file the bot then rejects as too big, as not an image, or as
+    unreadable has already been billed. Nobody noticed while the count was
+    invisible; the moment the report shows "9 of 10 used today" under a refusal,
+    the bot is visibly charging for work it declined to do.
+    """
+    await _quietly(storage.note_outcome(event_id, reason), "note the refusal")
+    if user is not None:
+        await _quietly(storage.refund(user.id), "refund the quota")
+
 
 router = Router(name="findpic")
 #: Analysing a file costs CPU and disk; tapping a button costs nothing. Keeping
@@ -49,34 +106,9 @@ router = Router(name="findpic")
 media_router = Router(name="findpic-media")
 
 #: MIME types we will attempt. exiftool reads far more than this, but a bot that
-#: accepts .exe "for analysis" is a service nobody should run.
+#: accepts .exe "for analysis" is a service nobody should run. The suffix list
+#: lives beside the sanitiser that has to agree with it.
 IMAGE_MIME_PREFIXES = ("image/", "video/")
-IMAGE_SUFFIXES = {
-    ".jpg",
-    ".jpeg",
-    ".jpe",
-    ".png",
-    ".gif",
-    ".webp",
-    ".avif",
-    ".bmp",
-    ".tif",
-    ".tiff",
-    ".heic",
-    ".heif",
-    ".dng",
-    ".cr2",
-    ".cr3",
-    ".nef",
-    ".arw",
-    ".orf",
-    ".rw2",
-    ".raf",
-    ".pef",
-    ".srw",
-    ".mp4",
-    ".mov",
-}
 
 
 # ------------------------------------------------------------------- commands
@@ -121,7 +153,10 @@ def privacy_notice(t: Translator, config: Config) -> str:
             if days > 0
             else t.get("bot.privacy.retention.forever")
         )
-        extra = f"{t.get('bot.privacy.analytics')} {retention}\n{t.get('bot.privacy.never')}"
+        extra = (
+            f"{t.get('bot.privacy.analytics')} {retention}\n"
+            f"{t.get('bot.privacy.never', ttl_hours=config.analysis_ttl_seconds // 3600)}"
+        )
     return t.get("bot.privacy", ttl_hours=config.analysis_ttl_seconds // 3600, extra=extra)
 
 
@@ -281,7 +316,7 @@ async def handle_document(
     """A picture sent as a file — the original bytes, which is what we want."""
     document = message.document
     if not _looks_like_image(document.file_name, document.mime_type):
-        await storage.note_outcome(event_id, "not_an_image")
+        await _refuse(storage, event_id, message.from_user, "not_an_image")
         await message.answer(t.get("bot.error.not_an_image"))
         return
     await _analyse_and_reply(
@@ -299,7 +334,9 @@ async def handle_document(
     )
 
 
-@media_router.message(F.video | F.animation | F.video_note | F.audio | F.voice)
+# On the unmetered router deliberately: this path never analyses anything,
+# so charging a daily slot for it would bill the user for a signpost.
+@router.message(F.video | F.animation | F.video_note | F.audio | F.voice)
 async def handle_other_media(message: Message, t: Translator) -> None:
     await message.answer(t.get("bot.error.send_as_file"))
 
@@ -325,7 +362,7 @@ async def _analyse_and_reply(
     event_id: int | None = None,
 ) -> None:
     if file_size and file_size > config.max_file_bytes:
-        await storage.note_outcome(event_id, "too_big")
+        await _refuse(storage, event_id, message.from_user, "too_big")
         await message.answer(t.get("bot.error.too_big", limit=t.bytes(config.max_file_bytes)))
         return
 
@@ -337,28 +374,41 @@ async def _analyse_and_reply(
         )
     except ExifToolError as error:
         logger.warning("analysis failed for %s: %s", file_name, error)
-        await storage.note_outcome(event_id, "unreadable")
+        await _refuse(storage, event_id, message.from_user, "unreadable")
         await message.answer(t.get("bot.error.unreadable"))
         return
     except Exception:  # noqa: BLE001 - one bad file must not kill the bot
         logger.exception("unexpected failure analysing %s", file_name)
-        await storage.note_outcome(event_id, "failed")
+        # Deliberately not refunded: a file that reliably crashes the analysis
+        # would otherwise be an unlimited retry loop.
+        await _quietly(storage.note_outcome(event_id, "failed"), "note failure")
         await message.answer(t.get("bot.error.internal"))
         return
 
     await _note_equipment(storage, event_id, report, compressed=compressed)
 
-    token = await storage.remember_analysis(
-        user_id=message.from_user.id,
-        file_id=file_id,
-        file_name=file_name,
-        now=time.time(),
+    token = await _quietly(
+        storage.remember_analysis(
+            user_id=message.from_user.id,
+            file_id=file_id,
+            file_name=file_name,
+            now=time.time(),
+        ),
+        "remember the analysis",
     )
 
     note = ""
     if compressed:
         # Said up front, because otherwise an empty report reads as a broken bot.
-        note = f"⚠️ <b>{esc(t.get('bot.note.compressed.title'))}</b>\n{esc(t.get('bot.note.compressed.body'))}"
+        #
+        # NOT escaped, and that is not an oversight. esc() belongs on a
+        # catalogue string only when *metadata* is interpolated into it — that
+        # is what neutralises an Artist tag set to "</b><script>". These two
+        # strings take no parameters and carry their own markup, so escaping
+        # them printed the tags to the user: for months every reader of this
+        # note was told to send the picture "as a &lt;b&gt;file&lt;/b&gt;",
+        # which is the single instruction the whole bot depends on.
+        note = compressed_note(t)
 
     body = render_report(report, source_note=note)
     await message.answer(
@@ -472,7 +522,7 @@ async def handle_backup(
 
     await query.message.answer_document(
         BufferedInputFile(data, filename=name),
-        caption=t.get("bot.backup.caption", size=t.bytes(len(data)), name=name),
+        caption=t.get("bot.backup.caption", size=t.bytes(len(data)), name=esc(name)),
     )
 
 
@@ -494,7 +544,7 @@ async def handle_clean_copy(
     await bot.send_chat_action(query.message.chat.id, ChatAction.UPLOAD_DOCUMENT)
 
     try:
-        cleaned, name, removed = await service.clean(
+        result = await service.clean(
             bot=bot, file_id=handle.file_id, file_name=handle.file_name or "photo.jpg"
         )
     except Exception:  # noqa: BLE001
@@ -503,6 +553,23 @@ async def handle_clean_copy(
         return
 
     await query.message.answer_document(
-        BufferedInputFile(cleaned, filename=name),
-        caption=t.get("bot.clean.caption", removed=removed),
+        BufferedInputFile(result.data, filename=result.name),
+        caption=_clean_caption(t, result),
     )
+
+
+def _clean_caption(t: Translator, result: CleanResult) -> str:
+    """What the strip actually cost, in the terms the reader cares about.
+
+    A tag count is not one of those terms. "131 metadata tags removed" tells
+    somebody nothing they can act on, and it was silently wrong whenever either
+    exiftool read failed. What they want to know is whether the place, the
+    moment and the camera are gone — so that is what this says, and when the
+    count could not be taken it simply is not claimed.
+    """
+    if not result.lost:
+        # Either nothing identifying was in the file, or the comparison could
+        # not be made. Do not assert which.
+        return t.get("bot.clean.caption.uncounted")
+    lost = t.get("ui.list.separator").join(t.get(f"clean.lost.{name}") for name in result.lost)
+    return t.get("bot.clean.caption", lost=lost)

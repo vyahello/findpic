@@ -129,3 +129,31 @@ def truncate(value: Any, limit: int = 120) -> str:
     text = value if isinstance(value, str) else str(value)
     text = text.replace("\n", "\\n").replace("\r", "\\r")
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def compare_geometry(
+    exif: tuple[int | None, int | None], real: tuple[int | None, int | None]
+) -> str | None:
+    """How the picture's real size relates to the size Exif remembers.
+
+    ``None`` when they agree or either is unreadable, else ``"rotate"``,
+    ``"resize"`` or ``"crop"``.
+
+    Shared because two rules were computing it separately and reaching different
+    answers about the same four integers: on a plain downscale one said
+    "resized" and the next line said "the preview may still show what was
+    cropped out". They cannot now diverge, and the orientation-swap exemption —
+    a lossless rotate is neither a crop nor a resize — lives in one place
+    instead of being remembered twice.
+    """
+    exif_width, exif_height = exif
+    real_width, real_height = real
+    if not all((exif_width, exif_height, real_width, real_height)):
+        return None
+    if (exif_width, exif_height) == (real_width, real_height):
+        return None
+    if (exif_width, exif_height) == (real_height, real_width):
+        return "rotate"
+    original = exif_width / exif_height
+    current = real_width / real_height
+    return "resize" if abs(original - current) / original < 0.01 else "crop"

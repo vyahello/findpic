@@ -397,10 +397,45 @@ def render_report(report: Report, *, source_note: str = "") -> str:
         + render_exposure_risks(report)
     )
 
+    return _fit(parts, report.translator)
+
+
+def _fit(parts: list[str], t: Translator) -> str:
+    """Join the lines, dropping whole lines rather than cutting one in half.
+
+    Slicing a string of HTML at an arbitrary offset lands inside a tag about as
+    often as not, and Telegram answers an unbalanced entity with
+    ``Bad Request: can't parse entities`` — which means the user receives
+    *nothing at all*, not a shortened report. Truncating on line boundaries
+    cannot produce that, because every line this module emits is balanced on its
+    own.
+
+    ``SAFE_LIMIT`` rather than ``MESSAGE_LIMIT`` leaves room for the note that
+    says something was left out; the note is the difference between a report
+    that looks finished and one the reader knows to follow up.
+    """
     message = "\n".join(parts)
-    if len(message) > MESSAGE_LIMIT:
-        message = message[: MESSAGE_LIMIT - 1] + "…"
-    return message
+    if len(message) <= SAFE_LIMIT:
+        return message
+
+    # Skip what does not fit rather than stopping at it. One pathological tag —
+    # a 4 kB place name, a colour profile with a novel in it — would otherwise
+    # take every section below it down as collateral, including the one line
+    # that tells the reader what the file gives away.
+    kept: list[str] = []
+    size = 0
+    dropped = False
+    for line in parts:
+        if size + len(line) + 1 > SAFE_LIMIT:
+            dropped = True
+            continue
+        kept.append(line)
+        size += len(line) + 1
+
+    message = "\n".join(kept)
+    if dropped:
+        message += "\n\n" + t.get("bot.truncated")
+    return message if len(message) <= MESSAGE_LIMIT else t.get("bot.truncated")
 
 
 def render_tag_dump(report: Report) -> str:

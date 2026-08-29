@@ -414,7 +414,12 @@ def collect(conn: sqlite3.Connection, since: str | None, now: dt.datetime) -> di
 
     known_total = len(people)
     active = len(per_user)
-    new = sum(1 for row in roster if not since or (row["first_seen"] or "") >= since)
+    # With no window there is nothing for "new" to be new *since*, so the split
+    # is undefined rather than universal. It used to report every account as
+    # new and none as returning, which is the opposite of what --all shows.
+    new = (
+        sum(1 for row in roster if (row["first_seen"] or "") >= since) if since else None
+    )
 
     return {
         "generated_at": now.isoformat(timespec="seconds"),
@@ -423,7 +428,7 @@ def collect(conn: sqlite3.Connection, since: str | None, now: dt.datetime) -> di
             "known": known_total,
             "active": active,
             "new": new,
-            "returning": active - new,
+            "returning": (active - new) if new is not None else None,
         },
         "use": {
             "interactions": len(events),
@@ -480,11 +485,17 @@ def render(stats: dict[str, Any], ink: Ink, *, source: str, limit: int) -> None:
 
     people, use = stats["people"], stats["use"]
     out("\n")
-    out(
-        f"  {ink.bold(str(people['known']))} accounts known · "
-        f"{people['active']} active in this window · "
-        f"{people['new']} new · {people['returning']} returning\n"
-    )
+    if people["new"] is None:
+        out(
+            f"  {ink.bold(str(people['known']))} accounts known · "
+            f"{people['active']} of them active, over the whole history\n"
+        )
+    else:
+        out(
+            f"  {ink.bold(str(people['known']))} accounts known · "
+            f"{people['active']} active in this window · "
+            f"{people['new']} new · {people['returning']} returning\n"
+        )
     out(
         f"  {ink.bold(str(use['interactions']))} interactions · "
         f"{use['photos']} pictures sent · {use['analysed']} analysed"
@@ -664,10 +675,35 @@ def write_csv(stats: dict[str, Any], path: Path) -> None:
         writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
         for row in stats["roster"]:
-            writer.writerow({key: row.get(key) for key in columns})
+            writer.writerow({key: _cell(row.get(key)) for key in columns})
+
+
+def _cell(value: object) -> object:
+    """One CSV field, safe to open in a spreadsheet.
+
+    Every other output path in this script sanitises — safe() for the terminal —
+    and this one did not. Two problems, both from text a stranger chose: control
+    bytes and escape sequences survive into the file, and a value beginning
+    ``=``, ``+``, ``-`` or ``@`` is executed as a formula by Excel and Sheets
+    the moment the admin opens it.
+    """
+    if not isinstance(value, str):
+        return value
+    text = safe(value)
+    return "'" + text if text[:1] in "=+-@" else text
 
 
 # ----------------------------------------------------------------------- main
+
+
+def _env_port() -> int | None:
+    """The ssh port from the environment, ignoring anything that is not one.
+
+    A malformed value should fall back to ssh's own default rather than crash a
+    report the operator is running to find out what is wrong.
+    """
+    raw = (os.environ.get("FINDPIC_BOT_PORT") or "").strip()
+    return int(raw) if raw.isdigit() else None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -700,6 +736,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="HOST",
         default=os.environ.get("FINDPIC_BOT_HOST"),
         help="the same, on another machine, over ssh (env: FINDPIC_BOT_HOST)",
+    )
+    source.add_argument(
+        "--ssh-port",
+        metavar="PORT",
+        type=int,
+        default=_env_port(),
+        help="ssh port, when the server does not listen on 22 (env: FINDPIC_BOT_PORT)",
     )
     source.add_argument("--volume", default=DEFAULT_VOLUME, help="Docker volume holding the data")
     source.add_argument("--image", default=DEFAULT_IMAGE, help="image used to read the volume")
@@ -745,8 +788,11 @@ def main(argv: list[str] | None = None) -> int:
             # remote login shell, so the quoting has to survive that trip —
             # otherwise the `sh -c` payload comes apart and half of it runs on
             # the host instead of inside the container.
+            ssh = ["ssh"]
+            if args.ssh_port:
+                ssh += ["-p", str(args.ssh_port)]
             database = pull(
-                ["ssh", args.ssh, shlex.join(command)], workspace, source, args.volume
+                [*ssh, args.ssh, shlex.join(command)], workspace, source, args.volume
             )
         else:
             live = args.db or find_database()

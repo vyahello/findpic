@@ -129,6 +129,11 @@ def analyze_metadata(
         groups=metadata.group_counts(),
         exiftool_warnings=metadata.warnings,
         errors=metadata.errors,
-        raw=dict(metadata.human),
+        # Both passes, human winning on collision. exiftool reads some tags
+        # only numerically, so `human` alone is a subset — which made the
+        # tag dump's own caption ("every tag I could read — 182 of them")
+        # false by thirteen on a real iPhone file. Merging makes
+        # `tag_count == len(raw)` true by construction.
+        raw={**dict(metadata.numeric), **dict(metadata.human)},
         translator=translator,
     )

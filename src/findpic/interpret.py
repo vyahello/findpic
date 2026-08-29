@@ -169,21 +169,47 @@ def _shutter_text(seconds: float) -> str:
 
 
 def describe_subject_distance(text: str | None) -> Note | None:
-    """Apple records how far the lens was focused; that is where the subject was."""
+    """Apple records how far the lens was focused; that is where the subject was.
+
+    What Apple records is a *range* — "4.96 - 24.97 m" — and averaging it
+    produced "about 15 m", a number that appears nowhere in the file and
+    describes nothing: the same phrasing served a ±10 m spread and a ±7 cm one.
+    A wide range is reported as a range, so the reader can see the lens was not
+    sure either.
+    """
     if not text:
         return None
-    numbers = [
-        float(part) for part in text.replace("m", "").replace("-", " ").split() if _is_number(part)
-    ]
+    # exiftool emits " - " between the bounds; fall back to the loose parse for
+    # any other shape rather than losing the reading entirely.
+    parts = str(text).split(" - ")
+    numbers = [float(part) for part in _numbers_in(parts if len(parts) == 2 else [str(text)])]
     if not numbers:
         return None
+
+    low, high = min(numbers), max(numbers)
     middle = sum(numbers) / len(numbers)
+    # Band on the midpoint, never on `high`: re-banding would silently
+    # reclassify a 0.1–0.9 m macro range as an ordinary distance.
     if middle < 0.6:
         return Note("detail.distance.macro", {"value": f"{middle:.2f}"})
     if middle > 900:
         return Note("detail.distance.infinity", {})
-    value = f"{middle:.1f}" if middle < 10 else f"{middle:.0f}"
-    return Note("detail.distance.metres", {"value": value})
+    if low and high / low > 1.5:
+        return Note("detail.distance.range", {"low": _metres(low), "high": _metres(high)})
+    return Note("detail.distance.metres", {"value": _metres(middle)})
+
+
+def _metres(value: float) -> str:
+    return f"{value:.1f}" if value < 10 else f"{value:.0f}"
+
+
+def _numbers_in(chunks: list[str]) -> list[str]:
+    found = []
+    for chunk in chunks:
+        for part in chunk.replace("m", "").replace("-", " ").split():
+            if _is_number(part):
+                found.append(part)
+    return found
 
 
 def _is_number(text: str) -> bool:

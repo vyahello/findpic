@@ -34,6 +34,10 @@ services:
       BOT_API_FILES_ROOT: /var/lib/telegram-bot-api
       DATABASE_PATH: /data/findpic-bot.sqlite3
       WORK_DIR: /tmp/findpic
+      # Without this the geocode cache resolves to ~/.cache, which is inside the
+      # read-only image: every save failed silently and every GPS photo paid a
+      # live Nominatim round trip, one per second, holding a worker thread.
+      XDG_CACHE_HOME: /data/cache
       # The janitor owns deletion; this process has no write access there.
       DELETE_SOURCE_FILES: "0"
     volumes:

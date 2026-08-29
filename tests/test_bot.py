@@ -788,7 +788,9 @@ def test_the_privacy_notice_admits_the_usage_record(language: str) -> None:
     t = Translator(language)
     notice = privacy_notice(t, Config(**TOKEN_CONFIG, analytics=True))
     assert t.get("bot.privacy.analytics") in notice
-    assert t.get("bot.privacy.never") in notice
+    # The key now takes the handle lifetime, because the notice has to name
+    # the one filename the bot really does keep and for how long.
+    assert t.get("bot.privacy.never", ttl_hours=24) in notice
     assert "90" in notice, "the retention window has to be stated, not implied"
     assert t.get("bot.privacy.no_analytics") not in notice
 
@@ -799,6 +801,7 @@ def test_the_notice_drops_the_claim_when_recording_is_off(language: str) -> None
     notice = privacy_notice(t, Config(**TOKEN_CONFIG, analytics=False))
     assert t.get("bot.privacy.no_analytics") in notice
     assert t.get("bot.privacy.analytics") not in notice
+    assert "{" not in notice
 
 
 @pytest.mark.parametrize("language", available_languages())
@@ -830,3 +833,118 @@ def test_analytics_settings_come_from_the_environment(monkeypatch: pytest.Monkey
     assert config.analytics is False
     assert config.analytics_retention_days == 7
     assert "analytics=off" in config.describe()
+
+
+# ------------------------------------------------------- the defects, pinned
+
+
+@pytest.mark.parametrize("language", available_languages())
+def test_the_send_it_as_a_file_instruction_is_not_escaped(language: str) -> None:
+    """The one sentence the whole bot depends on, and it was broken.
+
+    `bot.note.compressed.body` carries `<b>file</b>` and was run through esc(),
+    so every user who sent a picture the ordinary way was told to send it "as a
+    &lt;b&gt;file&lt;/b&gt;" — in both languages, on the path two of the owner's
+    own six pictures took.
+    """
+    from findpic.bot.handlers import compressed_note
+
+    note = compressed_note(Translator(language))
+    assert "&lt;" not in note and "&gt;" not in note
+    assert "<b>" in note
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_metadata_is_still_escaped_even_though_the_note_is_not(
+    camera_jpeg: Path, tmp_path: Path
+) -> None:
+    """The complement, and the reason the fix above is narrow.
+
+    "Never esc() a catalogue string" would be the obvious generalisation and it
+    is the dangerous one: esc() on a catalogue string is exactly what
+    neutralises an Artist tag set to markup. The rule is that esc() belongs
+    wherever metadata is interpolated, and nowhere else.
+    """
+    import subprocess
+
+    target = tmp_path / "hostile.jpg"
+    target.write_bytes(camera_jpeg.read_bytes())
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-q",
+            "-Artist=</b><script>alert(1)</script>",
+            "-Keywords=<b>injected",
+            str(target),
+        ],
+        check=False,
+        capture_output=True,
+    )
+    body = render_report(analyze(target, options=AnalysisOptions(geocode=False, hash_file=False)))
+    assert "<script>" not in body
+    assert "&lt;script&gt;" in body or "alert" not in body
+
+
+def test_the_report_survives_a_pathological_tag_value(gps_jpeg: Path) -> None:
+    """A 4 kB field must cost its own line, not the rest of the report.
+
+    Slicing HTML at an arbitrary offset lands inside a tag about as often as
+    not, and Telegram answers an unbalanced entity by rejecting the whole
+    message — so the user gets nothing at all rather than a shortened report.
+    """
+    from html.parser import HTMLParser
+
+    report = analyze(gps_jpeg, options=AnalysisOptions(geocode=False))
+    report.location.place = "X" * 5000
+    body = render_report(report)
+
+    class Balance(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.open: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs: object) -> None:
+            if tag != "br":
+                self.open.append(tag)
+
+        def handle_endtag(self, tag: str) -> None:
+            if self.open and self.open[-1] == tag:
+                self.open.pop()
+            else:
+                self.open.append(f"unbalanced-{tag}")
+
+    checker = Balance()
+    checker.feed(body)
+    assert not checker.open, f"unbalanced HTML would be rejected by Telegram: {checker.open}"
+    assert len(body) <= MESSAGE_LIMIT
+    assert Translator("en").get("bot.truncated") in body
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_the_tag_dump_holds_every_tag_it_claims(gps_jpeg: Path) -> None:
+    """The caption said 182 and the file held 169."""
+    report = analyze(gps_jpeg, options=AnalysisOptions(geocode=False))
+    lines = render_tag_dump(report).splitlines()
+    # Everything after the rule is one tag per line.
+    body = lines[lines.index("=" * 60) + 1 :]
+    assert report.tag_count == len(report.raw)
+    assert len([line for line in body if line.strip()]) == report.tag_count
+
+
+async def test_a_refused_file_gives_the_quota_slot_back(storage: Storage) -> None:
+    """The throttle charges before the handler has looked at the file.
+
+    So a file the bot then rejects as too big has already cost its sender one of
+    their analyses for the day — invisible until the report started showing the
+    count, and then visibly billing for work the bot declined to do.
+    """
+    await storage.check_and_consume(7, throttle_seconds=0, daily_quota=10, now=1000.0)
+    await storage.refund(7)
+    spent = await rows(storage, "SELECT count FROM usage WHERE user_id = 7")
+    assert spent[0]["count"] == 0
+
+
+async def test_a_refund_never_goes_negative(storage: Storage) -> None:
+    await storage.refund(7)
+    assert await rows(storage, "SELECT * FROM usage") == []

@@ -109,9 +109,11 @@ async def cleanup_loop(storage: Storage, config: Config) -> None:
     """Drop stale analysis handles so the database stays small."""
     import time
 
+    # Sweep first, then wait. The other order means a bot that restarts more
+    # often than hourly never purges anything at all, while /privacy promises a
+    # retention window — and a redeploying bot restarts far more often than that.
     while True:
         try:
-            await asyncio.sleep(CLEANUP_INTERVAL)
             removed = await storage.purge_expired(time.time() - config.analysis_ttl_seconds)
             await storage.purge_old_usage()
             forgotten = await storage.purge_old_events(config.analytics_retention_days)
@@ -119,6 +121,7 @@ async def cleanup_loop(storage: Storage, config: Config) -> None:
                 logger.info("purged %s expired analysis handles", removed)
             if forgotten:
                 logger.info("forgot %s usage records past the retention window", forgotten)
+            await asyncio.sleep(CLEANUP_INTERVAL)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001

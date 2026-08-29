@@ -33,6 +33,7 @@ from ..util import (
     human_bytes,
     parse_exif_datetime,
     same_moment,
+    truncate,
 )
 from .context import AnalysisOptions
 
@@ -72,7 +73,7 @@ def extract_image(meta: Metadata) -> ImageInfo:
         color_components=meta.int("File:ColorComponents"),
         subsampling=meta.str("File:YCbCrSubSampling"),
         color_space=meta.str("ExifIFD:ColorSpace", "ICC-header:ColorSpaceData"),
-        icc_profile=meta.str("ICC_Profile:ProfileDescription"),
+        icc_profile=truncate(meta.str("ICC_Profile:ProfileDescription"), 60),
     )
     thumbnail_length = meta.int("IFD1:ThumbnailLength")
     info.has_thumbnail = bool(thumbnail_length) or meta.has("ThumbnailImage")
@@ -317,7 +318,10 @@ def resolve_place(location: LocationInfo, geocoder: Geocoder) -> None:
         return
     place, error = geocoder.reverse(location.latitude, location.longitude)  # type: ignore[arg-type]
     if place is not None:
-        location.place = place.short_name
+        # Nominatim returns whatever the map data holds; a display name can
+        # run to hundreds of characters and would then be the one line that
+        # blows the whole Telegram message past its budget.
+        location.place = truncate(place.short_name, 120)
         location.place_detail = place.to_dict()
     elif error:
         location.geocode_error = error
