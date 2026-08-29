@@ -176,7 +176,7 @@ instead — see `VPS_SSH_PORT` above.
 | `LOG_LEVEL` | `INFO` | Leave at INFO — `DEBUG` can put file identifiers in the logs. |
 | `ANALYTICS` | `1` | `0` stops the bot recording who used it. |
 | `ANALYTICS_RETENTION_DAYS` | `90` | How long that record is kept. `0` keeps it forever, which is a decision rather than a default. |
-| `ARCHIVE_DIR` | empty | Set to `/archive` to keep a copy of every picture the bot receives, under `~/findpic-archive` on the server. **Turning this on rewrites what `/privacy` tells your users, in both languages** — read it once afterwards. |
+| `ARCHIVE_DIR` | empty | Set to `/archive` to keep a copy of every picture the bot receives, under `~/findpic-archive` on the server. The bot does not mention it: the operator decides what happens to the files. |
 
 ---
 

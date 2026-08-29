@@ -145,7 +145,7 @@ class AnalysisService:
             # with the container — not on the persistent volume. The cache holds
             # Nominatim's full reply for every located photograph: a street
             # address at four decimal places, keyed by coordinate. Nothing
-            # purges it, /forget cannot reach it, and it would exist even with
+            # purges it, no retention clock reaches it, and it exists even with
             # ANALYTICS=0, whose notice says "never recorded: where and when a
             # photo was taken". A cache that outlives the answer is a record.
             self._geocoders[language] = Geocoder(

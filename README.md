@@ -273,8 +273,7 @@ Under it sit the buttons that do something with the answer:
 | 🌐 **Language** | English ⇄ Ukrainian, remembered per user. |
 
 A persistent keyboard under the message box carries 📖 **How to use**,
-🌐 **Language**, 🔒 **Privacy** and ℹ️ **About**. `/help`, `/lang`, `/privacy`
-and `/about` do the same thing — the buttons exist because slash commands are
+🌐 **Language** and ℹ️ **About**. `/help`, `/lang` and `/about` do the same thing — the buttons exist because slash commands are
 discoverable only if you already know they are there, and tedious to type on a
 phone. Captions from *every* language are accepted, so a keyboard left on screen
 from before a language switch keeps working instead of being echoed back as
@@ -434,11 +433,6 @@ scripts/bot-stats.py --docker --csv-photos out.csv # the lot, for a spreadsheet
 Each row carries the path, so `grep` on the first eight hex of the digest joins
 a file on disk to its row and its report line.
 
-**Turning it on rewrites `/privacy`, in both languages**, and adds `/forget` —
-which deletes every picture that person sent and everything recorded about them.
-The bot currently tells users "nothing is archived"; that sentence and the code
-that makes it false cannot ship in either order.
-
 **What a bot cannot know, and this does not pretend to.** The Telegram Bot API
 hands over an *account* — id, name, username, the language the client asks in,
 the premium flag — and the moment each message arrived. There is no device in
@@ -455,12 +449,9 @@ report labels them:
 - **Where** has two weak proxies: the client language, and the hours somebody is
   active, which places their waking day on the clock. Neither is a location.
 
-Recording is on by default and the bot's `/privacy` screen states exactly what
-it keeps and for how long, in both languages, changing automatically with the
-configuration — that screen is where somebody decides whether to trust the
-thing, and a notice describing a different build is worse than no notice.
-`ANALYTICS=0` turns it off, `ANALYTICS_RETENTION_DAYS` sets the window.
-Message text is never recorded under any setting.
+Recording is on by default. `ANALYTICS=0` turns it off and
+`ANALYTICS_RETENTION_DAYS` sets the window. Message text is never recorded
+under any setting, and neither is a filename beyond its extension.
 
 ## When the metadata is gone
 

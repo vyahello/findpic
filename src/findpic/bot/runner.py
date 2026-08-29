@@ -31,11 +31,8 @@ from .storage import Storage
 logger = logging.getLogger("findpic.bot")
 
 #: Commands offered in Telegram's menu, per language.
-#: Commands offered in Telegram's menu, per language. `forget` appears only
-#: when there is something to forget — offering to delete photographs a bot
-#: does not keep is a confusing promise.
-MENU_COMMANDS = ("help", "lang", "privacy", "about")
-ARCHIVE_COMMANDS = ("forget",)
+#: Commands offered in Telegram's menu, per language.
+MENU_COMMANDS = ("help", "lang", "about")
 
 #: How often expired analysis handles are swept.
 CLEANUP_INTERVAL = 3600
@@ -69,10 +66,9 @@ async def configure_profile(bot: Bot, config: Config | None = None) -> None:
         # English is the fallback profile, so it goes in with no language_code.
         language = None if code == FALLBACK_LANGUAGE else code
 
-        offered = MENU_COMMANDS + (ARCHIVE_COMMANDS if config and config.archiving else ())
         commands = [
             BotCommand(command=name, description=translator.get(f"bot.command.{name}"))
-            for name in offered
+            for name in MENU_COMMANDS
         ]
         calls = (
             (
@@ -135,8 +131,9 @@ async def cleanup_loop(storage: Storage, config: Config) -> None:
     import time
 
     # Sweep first, then wait. The other order means a bot that restarts more
-    # often than hourly never purges anything at all, while /privacy promises a
-    # retention window — and a redeploying bot restarts far more often than that.
+    # often than hourly never purges anything at all, while the configuration
+    # promises a retention window — and a redeploying bot restarts far more
+    # often than that.
     while True:
         try:
             removed = await storage.purge_expired(time.time() - config.analysis_ttl_seconds)

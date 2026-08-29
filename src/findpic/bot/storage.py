@@ -18,7 +18,7 @@ bot's own privacy notice has to be true:
   has asked for it, or where the archive is keeping the whole file anyway — and
   then as a day and a town, never a second and never a street. That is the
   thing this bot warns people about, so the switch that governs it is separate
-  from the one that governs everything else, and ``/privacy`` says which is on.
+  from the one that governs everything else.
 """
 
 from __future__ import annotations
@@ -739,69 +739,12 @@ class Storage:
         )
         await self.db.commit()
 
-    async def archived_files(self, user_id: int) -> list[str]:
-        """Every kept picture belonging to one person."""
-        async with self.db.execute(
-            "SELECT rel_path FROM photos WHERE user_id = ? AND rel_path IS NOT NULL",
-            (user_id,),
-        ) as cursor:
-            return [row["rel_path"] for row in await cursor.fetchall()]
-
-    async def forget_everything(self, user_id: int, *, keep: set[str] | None = None) -> int:
-        """Delete one person's record and return how many rows went.
-
-        Called *after* the files have been unlinked, not before. Deleting the
-        rows first and then failing to unlink leaves a photograph on disk that
-        nothing in the database names — the same invariant the retention sweep
-        states in its own docstring, and the inverse of what /forget promises.
-
-        ``keep`` is the paths whose file could not be removed. Those rows stay,
-        because the row is the only handle anyone has on the file: losing it
-        makes the picture permanently unreachable rather than deleted.
-
-        The `users` row survives, deliberately: it holds a language preference
-        the person chose, and silently resetting it would be a worse surprise
-        than keeping it. The notice says so rather than claiming "everything".
-        """
-        keep = keep or set()
-        removed = 0
-        for table in ("events", "photos"):
-            async with self.db.execute(
-                f"SELECT COUNT(*) AS n FROM {table} WHERE user_id = ?", (user_id,)
-            ) as cursor:
-                row = await cursor.fetchone()
-            removed += int(row["n"]) if row else 0
-
-        if keep:
-            placeholders = ", ".join("?" * len(keep))
-            await self.db.execute(
-                f"DELETE FROM photos WHERE user_id = ? AND"
-                f" (rel_path IS NULL OR rel_path NOT IN ({placeholders}))",
-                (user_id, *keep),
-            )
-            removed -= len(keep)
-        else:
-            await self.db.execute("DELETE FROM photos WHERE user_id = ?", (user_id,))
-
-        for statement in (
-            "DELETE FROM events WHERE user_id = ?",
-            "DELETE FROM analyses WHERE user_id = ?",
-            "DELETE FROM usage WHERE user_id = ?",
-        ):
-            await self.db.execute(statement, (user_id,))
-        # The person's own row goes only when nothing of theirs is left to
-        # attribute — a kept file with no name against it is worse than no file.
-        if not keep:
-            await self.db.execute("DELETE FROM people WHERE user_id = ?", (user_id,))
-        await self.db.commit()
-        return max(0, removed)
-
     def expire_snapshots(self, keep_days: int) -> int:
         """Delete pre-upgrade copies of the database past the retention window.
 
         ``VACUUM INTO`` leaves a complete copy of everything the database held
         before the schema changed — including the people and pictures that
-        /forget and the retention sweep have since deleted from the live file.
+        the retention sweep has since deleted from the live file.
         Nothing looked at it, so "I hold nothing else about you" and "kept for
         90 days, then deleted" were both false for every account present when
         the snapshot was taken, permanently. After the window nothing in it may

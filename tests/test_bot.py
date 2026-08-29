@@ -31,7 +31,6 @@ from findpic.bot.format import (
     render_report,
     render_tag_dump,
 )
-from findpic.bot.handlers import privacy_notice
 from findpic.bot.keyboards import menu_labels
 from findpic.bot.middlewares import AccessMiddleware, AuditMiddleware, classify
 from findpic.bot.service import KeepRequest
@@ -602,7 +601,7 @@ def test_menu_labels_cover_every_language() -> None:
     from findpic.i18n import available_languages
 
     labels = menu_labels()
-    actions = {"help", "language", "privacy", "about"}
+    actions = {"help", "language", "about"}
     assert set(labels.values()) == actions
     # Every language contributes a caption for every action.
     assert len(labels) == len(actions) * len(available_languages())
@@ -616,7 +615,7 @@ def test_menu_captions_are_unique_across_languages() -> None:
     seen: dict[str, str] = {}
     for code in available_languages():
         t = Translator(code)
-        for action in ("help", "language", "privacy", "about"):
+        for action in ("help", "language", "about"):
             caption = t.get(f"bot.menu.{action}")
             assert caption not in seen or seen[caption] == action, (
                 f"{caption!r} means {seen.get(caption)} in one language and {action} in {code}"
@@ -632,7 +631,8 @@ def test_main_keyboard_is_persistent_and_sized() -> None:
     markup = main_keyboard(Translator("uk"))
     assert markup.is_persistent and markup.resize_keyboard
     rows = markup.keyboard
-    assert len(rows) == 2 and all(len(row) == 2 for row in rows)
+    assert len(rows) == 2
+    assert [len(row) for row in rows] == [2, 1]
     # Captions sit in a phone-width button; long ones wrap and look broken.
     for row in rows:
         for button in row:
@@ -777,55 +777,6 @@ def test_an_intact_photo_gets_no_traces_section(camera_jpeg: Path) -> None:
 
 
 TOKEN_CONFIG = {"token": TOKEN}
-
-
-@pytest.mark.parametrize("language", available_languages())
-def test_the_privacy_notice_admits_the_usage_record(language: str) -> None:
-    """The bot keeps a record of who used it, so the notice has to say so.
-
-    This is the screen where somebody decides whether to trust the thing, and
-    the whole argument of the project is that a claim about your data should be
-    checkable. A notice describing a build that keeps nothing, running on a
-    build that keeps something, is the exact failure findpic exists to expose.
-    """
-    t = Translator(language)
-    notice = privacy_notice(t, Config(**TOKEN_CONFIG, analytics=True))
-    assert t.get("bot.privacy.analytics") in notice
-    # The key now takes the handle lifetime, because the notice has to name
-    # the one filename the bot really does keep and for how long.
-    assert t.get("bot.privacy.never", ttl_hours=24) in notice
-    assert "90" in notice, "the retention window has to be stated, not implied"
-    assert t.get("bot.privacy.no_analytics") not in notice
-
-
-@pytest.mark.parametrize("language", available_languages())
-def test_the_notice_drops_the_claim_when_recording_is_off(language: str) -> None:
-    t = Translator(language)
-    notice = privacy_notice(t, Config(**TOKEN_CONFIG, analytics=False))
-    assert t.get("bot.privacy.no_analytics") in notice
-    assert t.get("bot.privacy.analytics") not in notice
-    assert "{" not in notice
-
-
-@pytest.mark.parametrize("language", available_languages())
-def test_the_notice_is_never_left_with_an_unfilled_placeholder(language: str) -> None:
-    """Translator.get swallows a formatting error and returns the raw template."""
-    t = Translator(language)
-    for config in (
-        Config(**TOKEN_CONFIG),
-        Config(**TOKEN_CONFIG, analytics=False),
-        Config(**TOKEN_CONFIG, analytics_retention_days=0),
-        Config(**TOKEN_CONFIG, analytics_retention_days=1),
-    ):
-        notice = privacy_notice(t, config)
-        assert "{" not in notice and "}" not in notice
-        assert len(notice) < MESSAGE_LIMIT
-
-
-def test_forever_is_stated_rather_than_printed_as_zero_days() -> None:
-    notice = privacy_notice(Translator("en"), Config(**TOKEN_CONFIG, analytics_retention_days=0))
-    assert Translator("en").get("bot.privacy.retention.forever") in notice
-    assert "0 days" not in notice
 
 
 def test_analytics_settings_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1211,37 +1162,6 @@ def test_resolve_refuses_to_leave_the_archive(archive, tmp_path: Path) -> None:
     assert archive.resolve("by-date/../../../etc/passwd") is None
 
 
-async def test_forget_deletes_the_pictures_and_the_record(storage: Storage) -> None:
-    """The counterpart to keeping copies. Without it the disclosure is a notice
-    rather than a choice, and the notice is the weaker half."""
-    from findpic.bot.storage import PhotoRecord
-
-    await storage.record_event(Person(7, "someone"), kind="file")
-    await storage.record_photo(
-        PhotoRecord(
-            user_id=7, at="2026-08-29T10:00:00+00:00", rel_path="by-date/x/one.jpg", state="stored"
-        )
-    )
-    await storage.record_photo(
-        PhotoRecord(user_id=8, at="2026-08-29T10:00:00+00:00", rel_path="by-date/x/two.jpg")
-    )
-    await storage.set_language(7, "uk")
-
-    # The files come out first, so the caller can unlink them before the rows
-    # that name them are deleted. The other order leaves a photograph on disk
-    # with nothing in the database pointing at it.
-    assert await storage.archived_files(7) == ["by-date/x/one.jpg"]
-    records = await storage.forget_everything(7)
-    assert records == 2, "one interaction and one picture"
-    assert await rows(storage, "SELECT * FROM photos WHERE user_id = 7") == []
-    assert await rows(storage, "SELECT * FROM people WHERE user_id = 7") == []
-    # Somebody else's picture is untouched.
-    assert len(await rows(storage, "SELECT * FROM photos WHERE user_id = 8")) == 1
-    # The language choice survives, and the notice says so rather than
-    # claiming "everything".
-    assert await storage.get_language(7, "en") == "uk"
-
-
 async def test_retention_deletes_the_file_before_its_row(storage: Storage) -> None:
     """A crash between the two must leave a row saying the copy is gone, never
     a photograph on disk that nothing in the database knows about."""
@@ -1284,53 +1204,6 @@ async def test_the_archive_accounting_counts_blobs_not_rows(storage: Storage) ->
     held, saved = await storage.archive_usage()
     assert held == 1000, "one copy of the bytes exists"
     assert saved == 2000, "two sends cost nothing"
-
-
-@pytest.mark.parametrize("language", available_languages())
-def test_the_notice_says_the_bot_keeps_a_copy_when_it_does(language: str) -> None:
-    """This cannot ship in either order: the bot currently tells every user, in
-    both languages, that nothing is archived."""
-    t = Translator(language)
-    off = privacy_notice(t, Config(token=TOKEN))
-    on = privacy_notice(t, Config(token=TOKEN, archive_dir=Path("/archive")))
-
-    assert t.get("bot.privacy.archive.off") in off
-    assert t.get("bot.privacy.archive.on") not in off
-
-    assert t.get("bot.privacy.archive.on") in on
-    assert t.get("bot.privacy.archive.off") not in on
-    assert t.get("bot.privacy.forget") in on, (
-        "keeping copies without an undo is a notice, not a choice"
-    )
-    assert "30" in on, "the retention window has to be stated"
-    assert "{" not in on and "{" not in off
-    assert len(on) < MESSAGE_LIMIT
-
-
-def test_the_notice_never_describes_a_build_other_than_the_running_one() -> None:
-    """The one screen where somebody decides whether to trust this. Every
-    permutation has to describe what the running configuration actually writes."""
-    import itertools
-
-    t = Translator("en")
-    for analytics, capture, archiving, days in itertools.product(
-        (True, False), (True, False), (True, False), (0, 30)
-    ):
-        config = Config(
-            token=TOKEN,
-            analytics=analytics,
-            analytics_capture=capture,
-            analytics_retention_days=days,
-            archive_dir=Path("/archive") if archiving else None,
-        )
-        notice = privacy_notice(t, config)
-        assert "{" not in notice
-        assert (t.get("bot.privacy.archive.on") in notice) is archiving
-        assert (t.get("bot.privacy.analytics") in notice) is analytics
-        # Capture is implied by archiving: the file on disk holds the exact
-        # coordinates, so withholding a locality from the index would be theatre.
-        expected_capture = analytics and (capture or archiving)
-        assert (t.get("bot.privacy.capture") in notice) is expected_capture
 
 
 async def test_a_row_never_goes_without_naming_its_file_first(storage: Storage) -> None:

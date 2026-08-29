@@ -101,7 +101,6 @@ def main_keyboard(translator: Translator) -> ReplyKeyboardMarkup:
                 KeyboardButton(text=translator.get("bot.menu.language")),
             ],
             [
-                KeyboardButton(text=translator.get("bot.menu.privacy")),
                 KeyboardButton(text=translator.get("bot.menu.about")),
             ],
         ],
@@ -118,7 +117,7 @@ def menu_labels() -> dict[str, str]:
     language while an old keyboard is still on screen, and the stale buttons
     should keep working rather than being echoed back as unrecognised text.
     """
-    actions = ("help", "language", "privacy", "about")
+    actions = ("help", "language", "about")
     labels: dict[str, str] = {}
     for code in available_languages():
         translator = Translator(code)

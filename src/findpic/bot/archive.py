@@ -270,7 +270,7 @@ class Archive:
         # format and WebP — so dedup missed every time, the disk cap
         # under-counted, and discarding the visible name left full copies of
         # the picture in objects/ that nothing referenced and nothing would
-        # ever delete. Retention and /forget both promise otherwise.
+        # ever delete, while the retention window promises otherwise.
         blob = self.root / OBJECTS / digest[:2] / digest[2:4] / f"{digest}{sniff(head)}"
         # The claim survives only on the browsable name, where it is a hint to
         # whatever opens the file and cannot affect what is stored where.
@@ -385,9 +385,9 @@ class Archive:
     def discard(self, rel_path: str) -> int | None:
         """Remove one kept picture, and its bytes if nothing else references them.
 
-        Returns the bytes freed, or None when the file is still there — which
-        /forget has to be able to tell apart from "there was nothing to remove",
-        because the two mean opposite things to the person who asked. The link count is what makes this
+        Returns the bytes freed, or None when the file is still there, which a
+        caller has to be able to tell apart from "there was nothing to remove":
+        the two mean opposite things to whatever is keeping the ledger. The link count is what makes this
         safe: a photograph two people sent has two names and one inode, and
         deleting the inode when the first is evicted would take the second
         person's picture with it.

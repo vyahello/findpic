@@ -443,19 +443,9 @@
   "finding.authenticity.jpeg_digest.detail.library": "The compression tables belong to libjpeg, which ImageMagick, Pillow, GIMP and most website upload pipelines use. It proves the pixels were compressed again after the camera wrote them, but it does not say which program did it. Estimated quality setting: {quality}.",
   "bot.command.help": "How to use this bot",
   "bot.command.lang": "Change language",
-  "bot.command.privacy": "What happens to your photos",
   "bot.command.about": "About findpic",
-  "bot.start": "👋 Hi {name}!\n\nSend me a photo and I will tell you <b>what device took it, when and where, whether it is an untouched original, and what it gives away about you.</b>\n\n⚠️ <b>One thing matters more than anything else:</b>\nSend the picture <b>as a file</b>, not as a photo.\n\nWhen you send a picture the normal way, Telegram re-compresses it and deletes every piece of metadata before I ever see it — so there is nothing left to read. Attach it as a document instead and I get the original, untouched.\n\n📎 <b>How:</b> paperclip → <b>File</b> → pick the photo → uncheck “compress”.\n\nEverything else is on the buttons below: 📖 <b>How to use</b> explains the report, 🔒 <b>Privacy</b> says what I do with your files.",
-  "bot.help": "<b>How to use findpic</b>\n\n<b>1. Send the picture as a file</b>\nPaperclip → <b>File</b> → choose the image → make sure “compress” is off.\nSent as an ordinary photo, Telegram strips the metadata first, and all I can tell you is that it was stripped.\n\n<b>2. Read the report</b>\nIt opens with the one question a photo can answer about itself: is this what came out of the camera, or was it cropped, edited or re-saved afterwards?\n\nThen the facts, each stated once:\n📱 <b>Device</b> — make, model, OS, lens, shooting mode\n🕓 <b>When</b> — the exact date and time of the shot\n📍 <b>Where</b> — place, coordinates, map link, altitude, and which way the camera was pointing\n📸 <b>The shot</b> — size, ISO, aperture, shutter, and what they say about the light\n⚠️ <b>What this gives away</b> — what would travel with the file if you forwarded it\n\n<b>3. Act on it</b>\n🧹 <b>Clean copy</b> — the same picture back, minus the metadata that identifies you; orientation and colour stay, so it still looks right. Offered only when there is something worth removing.\n🔍 <b>All tags</b> — every raw tag as a text file, including the ones the report leaves out.\n🌐 <b>Language</b> — English or Ukrainian, switchable at any time.\n\n<b>The buttons under the message box</b>\n📖 How to use · 🌐 Language · 🔒 Privacy · ℹ️ About\n/help, /lang, /privacy and /about do exactly the same, if you would rather type.",
-  "bot.privacy": "<b>What happens to your photos</b>\n\n{archive}\n• I keep only a short reference so the buttons under a report keep working, and that is discarded after {ttl_hours} hours.\n• Your language choice is stored against your Telegram user ID.\n{extra}\n\n<b>One outbound call:</b> if a photo contains GPS coordinates, those coordinates are sent to OpenStreetMap's Nominatim service to turn them into a place name. The image is never sent — only the two numbers.\n\n<b>Your originals are never modified.</b> A clean copy is a new file; the one you sent is untouched.\n\nThe whole thing is open source — read it rather than trust me:\ngithub.com/vyahello/findpic",
-  "bot.privacy.analytics": "• I keep a usage record, so whoever runs me can see whether anyone is using this: your Telegram account (id, name, username, the language your app asks in), which button or command you pressed, when, and — for a photo that still had its tags — the make, model and OS version of the camera that took it.",
-  "bot.privacy.retention": {
-    "one": "Kept for {count} day, then deleted.",
-    "other": "Kept for {count} days, then deleted."
-  },
-  "bot.privacy.retention.forever": "Kept until the person running the bot deletes it.",
-  "bot.privacy.never": "• <b>Never recorded:</b> anything you type, or where and when a photo was taken. Those are exactly what this bot warns you about; collecting them would be indefensible. The short reference above holds your file's name for {ttl_hours} hours so the buttons can find it again, and the usage log keeps its extension — nothing more of it.",
-  "bot.privacy.no_analytics": "• Nothing else about you is kept.",
+  "bot.start": "👋 Hi {name}!\n\nSend me a photo and I will tell you <b>what device took it, when and where, whether it is an untouched original, and what it gives away about you.</b>\n\n⚠️ <b>One thing matters more than anything else:</b>\nSend the picture <b>as a file</b>, not as a photo.\n\nWhen you send a picture the normal way, Telegram re-compresses it and deletes every piece of metadata before I ever see it — so there is nothing left to read. Attach it as a document instead and I get the original, untouched.\n\n📎 <b>How:</b> paperclip → <b>File</b> → pick the photo → uncheck “compress”.\n\nEverything else is on the buttons below: 📖 <b>How to use</b> explains the report, ℹ️ <b>About</b> says what I can and cannot tell you.",
+  "bot.help": "<b>How to use findpic</b>\n\n<b>1. Send the picture as a file</b>\nPaperclip → <b>File</b> → choose the image → make sure “compress” is off.\nSent as an ordinary photo, Telegram strips the metadata first, and all I can tell you is that it was stripped.\n\n<b>2. Read the report</b>\nIt opens with the one question a photo can answer about itself: is this what came out of the camera, or was it cropped, edited or re-saved afterwards?\n\nThen the facts, each stated once:\n📱 <b>Device</b> — make, model, OS, lens, shooting mode\n🕓 <b>When</b> — the exact date and time of the shot\n📍 <b>Where</b> — place, coordinates, map link, altitude, and which way the camera was pointing\n📸 <b>The shot</b> — size, ISO, aperture, shutter, and what they say about the light\n⚠️ <b>What this gives away</b> — what would travel with the file if you forwarded it\n\n<b>3. Act on it</b>\n🧹 <b>Clean copy</b> — the same picture back, minus the metadata that identifies you; orientation and colour stay, so it still looks right. Offered only when there is something worth removing.\n🔍 <b>All tags</b> — every raw tag as a text file, including the ones the report leaves out.\n🌐 <b>Language</b> — English or Ukrainian, switchable at any time.\n\n<b>The buttons under the message box</b>\n📖 How to use · 🌐 Language · ℹ️ About\n/help, /lang and /about do exactly the same, if you would rather type.",
   "bot.about": "<b>findpic</b> v{version}\nPhoto metadata, in plain English.\n\nPowered by exiftool {exiftool}.\n\n<b>What I cannot do</b>, stated plainly:\n• I cannot tell you whether an image is AI-generated — only whether it <i>says</i> it is. A stripped AI image and a stripped photo look identical to me.\n• I cannot prove a photo is genuine. Every tag I read can be forged.\n• I never look at the pixels, only at the metadata.\n\nSource, issues and the full rule list: github.com/vyahello/findpic",
   "bot.language.prompt": "🌐 Choose your language:",
   "bot.language.changed": "Language set to {language}",
@@ -486,7 +476,6 @@
   "bot.profile.description": "I read a photo's metadata and explain it in plain English:\n\n📱 what device took it, and on which OS\n🕓 the exact date and time\n📍 where — with a map link\n📸 how the shot was taken\n🔍 whether it is an untouched original\n⚠️ what it gives away about you\n\nSend the picture AS A FILE, not as a photo — Telegram strips the metadata from compressed photos before I ever see them.\n\nOpen source: github.com/vyahello/findpic",
   "bot.menu.help": "📖 How to use",
   "bot.menu.language": "🌐 Language",
-  "bot.menu.privacy": "🔒 Privacy",
   "bot.menu.about": "ℹ️ About",
   "bot.menu.placeholder": "Send a photo as a file…",
   "bot.menu.switched": "Language switched. The buttons below are updated.",
@@ -646,26 +635,5 @@
   "bot.where.unresolved": "I could not turn these coordinates into a place name right now. The coordinates themselves are exact — open the map link.",
   "detail.focal_pair": "{actual} lens — the same field of view as {equivalent} on a full-frame camera",
   "detail.firmware_build": "firmware build {value}",
-  "bot.headline.compressed_photo": "The photo you just sent",
-  "bot.privacy.archive.off": "• Your file is analysed and then <b>deleted immediately</b>. Nothing is archived.\n• The image itself is <b>never stored</b> in a database and never sent anywhere else.",
-  "bot.privacy.archive.on": "• <b>I keep a copy of your file.</b> Every picture you send is saved on the server I run on, exactly as it arrived — metadata and all — so the person who runs this bot can see what it is being used on.\n• Only that person can read it. It is not published, not sold, and not sent anywhere else.",
-  "bot.privacy.archive.retention": {
-    "one": "• Kept pictures are deleted after {count} day.",
-    "other": "• Kept pictures are deleted after {count} days."
-  },
-  "bot.privacy.archive.forever": "• Kept pictures stay until the person running the bot deletes them.",
-  "bot.privacy.archive.never": "• <b>Never recorded:</b> anything you type — the usage log holds accounts, buttons and camera names, never a message. But a photo carries where and when it was taken inside itself, and I am keeping the photo, so assume I am keeping that too.",
-  "bot.privacy.capture": "I also note the day it was taken and the town — never the exact time, never the street, never a precise coordinate.",
-  "bot.privacy.forget": "<b>Changed your mind?</b> Send /forget and I delete every picture of yours I hold and everything I have recorded about you. It cannot be undone, and I will ask you to confirm.",
-  "bot.forget.confirm": "This deletes <b>every picture of yours I have kept</b> and everything I have recorded about you: which buttons you pressed, when, and what cameras your photos named.\n\nIt cannot be undone. Your language choice stays, so the bot keeps speaking to you in {language}.\n\nSend /forget again within a minute to go ahead.",
-  "bot.forget.done": "Done. Deleted: {photos} kept pictures, {events} records of what you did.\n\nI hold nothing else about you except your language choice.",
-  "bot.forget.nothing": "There is nothing of yours to delete — I hold no pictures and no usage record for your account.",
-  "bot.command.forget": "Delete everything I hold about you",
-  "bot.archive.footer": "🗄 A copy of this file stays on the server. /privacy",
-  "bot.forget.partial": {
-    "one": "One of your kept pictures could not be deleted — it is still on the server. Everything else is gone; send /forget again later and I will try that one again.",
-    "other": "{count} of your kept pictures could not be deleted — they are still on the server. Everything else is gone; send /forget again later and I will try them again."
-  },
-  "bot.privacy.no_analytics.archive": "• Nothing else about you is kept — except one line for the copy above: your Telegram user ID, when it arrived, and where it sits on disk, so that /forget and the deletion clock can find it again.",
-  "bot.privacy.capture.never": "• <b>Never recorded:</b> anything you type, the street a photo was taken on, or the minute it was taken. The day and the town go into the usage log, as the line above says. The short reference holds your file's name for {ttl_hours} hours so the buttons can find it again."
+  "bot.headline.compressed_photo": "The photo you just sent"
 }
