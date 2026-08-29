@@ -40,6 +40,7 @@ jobs:
         env:
           SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_PORT: ${{ vars.VPS_SSH_PORT || '22' }}
           HOST_KEY: ${{ secrets.VPS_SSH_HOST_KEY }}
         run: |
           set -euo pipefail
@@ -51,7 +52,7 @@ jobs:
             printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
           else
             echo "::warning::VPS_SSH_HOST_KEY is not set; trusting the key on first use"
-            ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+            ssh-keyscan -p "$VPS_SSH_PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
           fi
           chmod 600 ~/.ssh/known_hosts
 
@@ -59,6 +60,9 @@ jobs:
         env:
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
+          # sshd does not always listen on 22, and a hardcoded port fails the
+          # deploy with "connection refused" and nothing else to go on.
+          VPS_SSH_PORT: ${{ vars.VPS_SSH_PORT || '22' }}
           VPS_APP_DIR: ${{ secrets.VPS_APP_DIR }}
           TARGET_SHA: ${{ steps.target.outputs.sha }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -173,13 +177,17 @@ jobs:
           docker compose up -d --remove-orphans
           docker image prune -f >/dev/null 2>&1 || true
           REMOTE
-          } | ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=20 \
+          } | ssh -i ~/.ssh/deploy_key -p "${VPS_SSH_PORT}" \
+                  -o BatchMode=yes -o ConnectTimeout=20 \
                   "${VPS_USER}@${VPS_HOST}" 'bash -euo pipefail -s'
 
       - name: Verify the bot came up
         env:
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
+          # sshd does not always listen on 22, and a hardcoded port fails the
+          # deploy with "connection refused" and nothing else to go on.
+          VPS_SSH_PORT: ${{ vars.VPS_SSH_PORT || '22' }}
           VPS_APP_DIR: ${{ secrets.VPS_APP_DIR }}
         run: |
           set -euo pipefail
@@ -211,7 +219,7 @@ jobs:
           fi
           echo "==> deploy verified"
           REMOTE
-          } | ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+          } | ssh -i ~/.ssh/deploy_key -p "${VPS_SSH_PORT}" -o BatchMode=yes \
                   "${VPS_USER}@${VPS_HOST}" 'bash -euo pipefail -s'
 
       - name: Remove the deploy key

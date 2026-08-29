@@ -158,7 +158,19 @@ These four already exist and are used by the deploy workflow:
 |---|---|
 | `ADMIN_USER_IDS` | Comma-separated Telegram IDs exempt from throttling and the daily quota. Put your own ID here — [@userinfobot](https://t.me/userinfobot) will tell you what it is. |
 | `ALLOWED_USER_IDS` | Set this to make the bot **private**. Only these IDs may use it; everyone else is told so and shown their own ID. Leave unset to keep it public. |
-| `VPS_SSH_HOST_KEY` | Pins the server's SSH host key instead of trusting it on first use. Get it with `ssh-keyscan -H <host>`. |
+| `VPS_SSH_HOST_KEY` | Pins the server's SSH host key instead of trusting it on first use. Get it with `ssh-keyscan -p <port> -H <host>`. |
+
+### Optional repository variables
+
+Variables rather than secrets — none of these is sensitive, and seeing their
+values in a workflow log is what you want when a deploy goes wrong.
+
+| Variable | Effect |
+|---|---|
+| `VPS_SSH_PORT` | The port sshd listens on. Defaults to 22; set it if yours moved, or every deploy fails with `connection refused` and nothing else to go on. |
+| `ARCHIVE_DIR` | Set to `/archive` to keep a copy of every picture the bot receives, under `~/findpic-archive` on the server. Empty (the default) keeps none. **Turning this on rewrites what `/privacy` tells your users, in both languages** — read it once afterwards. |
+| `ANALYTICS` | `0` stops the bot recording who used it. Default `1`. |
+| `ANALYTICS_RETENTION_DAYS` | How long that record is kept. `0` keeps it forever, which is a decision rather than a default. |
 
 ### Optional variables
 
