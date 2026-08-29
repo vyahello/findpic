@@ -172,6 +172,11 @@ class Config:
     #: How long a kept picture is kept. Clamped to the analytics window when
     #: that is shorter, so a file can never outlive the row that says whose it is.
     archive_retention_days: int = 30
+    #: The same directory as the host sees it. Never opened — `archive_dir` is
+    #: the one this process uses. This is written into the database so that a
+    #: report run anywhere else knows where the files really are; the container
+    #: path is meaningless the moment you leave the container.
+    archive_host_dir: str = ""
 
     database_path: Path = Path("/data/findpic-bot.sqlite3")
     work_dir: Path = Path("/tmp/findpic")
@@ -255,6 +260,7 @@ class Config:
             archive_max_user_bytes=_env_int("ARCHIVE_MAX_USER_MB", 512) * 1024 * 1024,
             archive_min_free_bytes=_env_int("ARCHIVE_MIN_FREE_MB", 2048) * 1024 * 1024,
             archive_retention_days=_archive_retention(),
+            archive_host_dir=os.environ.get("ARCHIVE_HOST_DIR", "").strip(),
             database_path=Path(os.environ.get("DATABASE_PATH", "/data/findpic-bot.sqlite3")),
             work_dir=Path(os.environ.get("WORK_DIR", "/tmp/findpic")),
             delete_source_files=_env_bool("DELETE_SOURCE_FILES", True),

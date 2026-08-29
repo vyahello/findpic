@@ -414,24 +414,39 @@ than no photograph. Nothing in the archive can fail an analysis: every outcome,
 including the refusals, is a row with a state, since an archive whose failures
 are invisible is worse than none.
 
-**Looking at them** needs no docker and no root — that is the whole reason for
-the bind mount:
+Two names for one set of bytes, via hard links: `objects/` is the warehouse and
+is named by content so the same picture can never be stored twice, `by-date/` is
+the index and is named by *when and who*. Deduplication needs the first, browsing
+needs the second, and a hard link gives you both without a second copy. A photo
+two people sent has three names and one inode, and deleting one leaves the other
+person's alone.
+
+**Getting them out** — one folder per sender, filenames a person can read:
 
 ```bash
-ls -lt ~/findpic-archive/by-date/2026-08-29/     # newest first
-scp -r you@server:~/findpic-archive/by-date/2026-08-29 .   # pull a day down
+scripts/bot-stats.py --docker --export ~/photos
+scripts/bot-stats.py --docker --export ~/photos --user @someone   # just theirs
+scripts/bot-stats.py --ssh you@server --export ~/photos           # from a laptop
 ```
 
-The report ties a file back to who sent it and what was found in it:
+```
+~/photos/olena_k-1001/2026-08-29/2026-08-29 15-39 Apple iPhone X 01dde9b2.jpg
+~/photos/id7332288724/2026-08-22/2026-08-22 21-15 no camera fc68d2f9.jpg
+```
+
+The folder keeps the numeric id beside the username, because a username can be
+given up and taken over — without it, one person renaming themselves would look
+like two. A display name is never used: those are arbitrary Unicode chosen by a
+stranger, and this is a real directory on your own machine. The eight hex at the
+end is what joins the file back to its row:
 
 ```bash
-scripts/bot-stats.py --docker --photos --limit 0   # every picture, one per line
-scripts/bot-stats.py --docker --user @someone      # one person's, in order
-scripts/bot-stats.py --docker --csv-photos out.csv # the lot, for a spreadsheet
+scripts/bot-stats.py --docker --csv-photos out.csv && grep 01dde9b2 out.csv
 ```
 
-Each row carries the path, so `grep` on the first eight hex of the digest joins
-a file on disk to its row and its report line.
+Every filter applies to the export, so `--with-gps --export DIR` fetches only the
+pictures that carried coordinates. It streams rather than buffering, because an
+archive of photographs does not fit in memory the way the database does.
 
 **What a bot cannot know, and this does not pretend to.** The Telegram Bot API
 hands over an *account* — id, name, username, the language the client asks in,

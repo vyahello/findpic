@@ -677,3 +677,96 @@ async def test_the_report_gives_every_busy_account_a_zone(
     assert "±" in printed
     assert "msgs, " in printed, "the evidence sits next to the guess"
     assert "UTC+2 2" not in printed, "the aggregate histogram named nobody and is gone"
+
+
+# ------------------------------------------------------------- exporting files
+
+
+def a_row(**over) -> dict:
+    row = {
+        "rel_path": "by-date/2026-08-29/20260829T153937Z-u7-01dde9b2.jpg",
+        "at": "2026-08-29T15:39:37+00:00",
+        "user_id": 7,
+        "username": "someone",
+        "make": "Apple",
+        "model": "iPhone X",
+        "stripped": False,
+    }
+    row.update(over)
+    return row
+
+
+def test_the_export_names_a_folder_after_the_sender() -> None:
+    assert stats.who_directory(a_row()) == "someone-7"
+
+
+def test_the_numeric_id_stays_in_the_folder_name() -> None:
+    """A username can be given up and taken over by somebody else.
+
+    Without the id, one person renaming themselves would look like two people,
+    and their older pictures would sit in a folder belonging to whoever has the
+    name now.
+    """
+    assert "7" in stats.who_directory(a_row())
+
+
+def test_a_hostile_username_never_becomes_a_directory() -> None:
+    """This is a real path on the operator's own machine."""
+    for handle in ("../../etc", "a/b", "..", "", None, "x" * 200, "ім'я", "a\x00b"):
+        folder = stats.who_directory(a_row(username=handle))
+        assert folder == "id7", handle
+
+
+def test_a_display_name_is_never_used_as_a_folder() -> None:
+    """Display names are arbitrary Unicode chosen by a stranger."""
+    assert stats.who_directory(a_row(username=None, who="../../root")) == "id7"
+
+
+def test_the_exported_name_reads_as_a_photograph() -> None:
+    name = stats.export_name(a_row())
+    assert name.startswith("2026-08-29 15-39")
+    assert "Apple iPhone X" in name
+    assert name.endswith("01dde9b2.jpg"), "the digest joins it back to the ledger"
+
+
+def test_a_stripped_photo_says_so_in_its_name() -> None:
+    assert "no camera" in stats.export_name(a_row(make=None, model=None, stripped=True))
+
+
+def test_an_exported_name_can_never_contain_a_separator() -> None:
+    name = stats.export_name(a_row(make="Ev/il", model="..\\x"))
+    assert "/" not in name and "\\" not in name
+
+
+def test_the_plan_comes_from_the_manifest_not_the_archive(tmp_path: Path) -> None:
+    """A tar from a machine this script does not control must not choose its
+    own filenames — so the destination is derived from the database row."""
+    payload = {"photos_log": [a_row(), a_row(rel_path=None)]}
+    plan = stats.export_plan(payload, tmp_path)
+    assert len(plan) == 1, "a row with no file is not fetched"
+    rel, destination = plan[0]
+    assert rel == a_row()["rel_path"]
+    assert destination.is_relative_to(tmp_path)
+
+
+def test_a_local_export_copies_the_files(tmp_path: Path) -> None:
+    root = tmp_path / "archive" / "by-date" / "2026-08-29"
+    root.mkdir(parents=True)
+    (root / "20260829T153937Z-u7-01dde9b2.jpg").write_bytes(b"\xff\xd8\xff picture")
+
+    into = tmp_path / "out"
+    written, missing = stats.export_photos(
+        {"photos_log": [a_row()]}, into, root=str(tmp_path / "archive"), remote=None
+    )
+    assert (written, missing) == (1, 0)
+    landed = list(into.rglob("*.jpg"))
+    assert len(landed) == 1
+    assert landed[0].read_bytes() == b"\xff\xd8\xff picture"
+    assert landed[0].parent.parent.name == "someone-7"
+
+
+def test_a_missing_file_is_counted_rather_than_crashing(tmp_path: Path) -> None:
+    written, missing = stats.export_photos(
+        {"photos_log": [a_row()]}, tmp_path / "out", root=str(tmp_path / "gone"), remote=None
+    )
+    assert (written, missing) == (0, 1)

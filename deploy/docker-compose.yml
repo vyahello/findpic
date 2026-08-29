@@ -42,6 +42,10 @@ services:
       # archive is a decision about other people's photographs, not a setting.
       # ARCHIVE_HOST_DIR in deploy/.env chooses where they land on the host.
       ARCHIVE_DIR: ${ARCHIVE_DIR:-}
+      # The same directory as the host sees it. The bot never opens this —
+      # it only writes it down, so a report reading the database from the
+      # host or from a laptop knows where the files actually are.
+      ARCHIVE_HOST_DIR: ${ARCHIVE_HOST_DIR:-}
       ARCHIVE_MAX_FILE_MB: "32"
       ARCHIVE_MAX_TOTAL_MB: "4096"
       ARCHIVE_MAX_USER_MB: "512"

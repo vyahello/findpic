@@ -52,6 +52,7 @@ import io
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import sqlite3
@@ -1034,8 +1035,12 @@ def collect(
     roster.sort(key=lambda row: (-row["photos"], -row["events"], row["user_id"]))
 
     names = {row["user_id"]: _label(row) for row in roster}
+    handles = {row["user_id"]: row["username"] for row in roster}
     for line in ledger:
         line["who"] = names.get(int(line["user_id"]), str(line["user_id"]))
+        # The account's handle, which the export names a folder after. Separate
+        # from `who`, which is a display label and may be a person's real name.
+        line["username"] = handles.get(int(line["user_id"]))
 
     known_total = len(people)
     active = len(per_user)
@@ -1046,7 +1051,9 @@ def collect(
 
     return {
         "generated_at": now.isoformat(timespec="seconds"),
-        "archive_dir": settings.get("archive_dir"),
+        # The host's path in preference to the container's: the container path
+        # is what the bot writes to and means nothing to anything outside it.
+        "archive_dir": settings.get("archive_host_dir") or settings.get("archive_dir"),
         "window": {"since": since, "until": picks.until or now.isoformat(timespec="seconds")},
         "filters": picks.spoken(),
         "schema": {
@@ -1739,6 +1746,165 @@ def render_user(stats: dict[str, Any], who: str, ink: Ink, *, width: int = NARRO
     return 0
 
 
+# --------------------------------------------------------------- fetching files
+
+
+#: A Telegram username is `[A-Za-z0-9_]{5,32}`, so it is already safe to be a
+#: path component — unlike a display name, which is arbitrary Unicode and gets
+#: nowhere near one.
+_USERNAME = re.compile(r"[A-Za-z0-9_]{1,32}")
+
+
+def who_directory(row: dict[str, Any]) -> str:
+    """The folder one person's pictures land in, on export.
+
+    The username, because that is what an operator recognises — with the
+    numeric id kept alongside it, because the username is the part that can
+    change. Somebody who renames themselves next month would otherwise appear
+    to be two people, and their older pictures would sit in a folder belonging
+    to whoever took the name over.
+
+    Never a display name: those are arbitrary Unicode chosen by a stranger, and
+    this is a real directory on the operator's own laptop.
+    """
+    handle = str(row.get("username") or "")
+    if _USERNAME.fullmatch(handle):
+        return f"{handle}-{row['user_id']}"
+    return f"id{row['user_id']}"
+
+
+def export_name(row: dict[str, Any]) -> str:
+    """What one picture is called once it is out of the store.
+
+    Written for somebody reading a directory listing, which is the whole reason
+    the export exists: the archive's own names are a content hash, and a hash is
+    the right name for deduplication and the wrong one for a person.
+
+    ``2026-08-29 15-39 iPhone X 01dde9b2.jpg``
+
+    The time first so the folder sorts chronologically, the camera because it is
+    the thing that distinguishes two pictures at a glance, and the short digest
+    last because it is the only handle that joins this file back to a row in the
+    ledger — and because two photographs really can arrive in the same minute.
+    """
+    stored = Path(str(row["rel_path"])).name
+    suffix = Path(stored).suffix or ".jpg"
+    digest = Path(stored).stem.rsplit("-", 1)[-1]
+    stamp = str(row["at"])
+    parts = [f"{stamp[:10]} {stamp[11:16].replace(':', '-')}"]
+
+    camera = " ".join(part for part in (row.get("make"), row.get("model")) if part)
+    if camera:
+        parts.append(camera)
+    elif row.get("stripped"):
+        # Worth saying: these are the ones that arrived with nothing in them.
+        parts.append("no camera")
+    parts.append(digest)
+    # `safe` strips control characters; the rest is what makes it a filename.
+    name = safe(" ".join(parts), 90)
+    return "".join(ch for ch in name if ch not in '/\\:*?"<>|') + suffix
+
+
+def export_plan(stats: dict[str, Any], into: Path) -> list[tuple[str, Path]]:
+    """Where each kept picture should land, as ``(rel_path, destination)``.
+
+    Built from the manifest, never from the archive itself: a tar arriving from
+    a machine this script does not control must not be allowed to choose its own
+    filenames. What comes back is matched against this plan and anything not in
+    it is dropped.
+    """
+    plan: list[tuple[str, Path]] = []
+    for line in stats["photos_log"]:
+        rel = line.get("rel_path")
+        if not rel:
+            continue
+        day = str(line["at"])[:10]
+        plan.append((rel, into / who_directory(line) / day / export_name(line)))
+    return plan
+
+
+def archive_tar_command(root: str, wanted: list[str]) -> list[str]:
+    """Ask the far end for exactly the files in the plan, and nothing else."""
+    listed = " ".join(shlex.quote(rel) for rel in wanted)
+    return ["sh", "-c", f"cd {shlex.quote(root)} && tar -cf - {listed}"]
+
+
+def export_photos(
+    stats: dict[str, Any], into: Path, *, root: str, remote: list[str] | None
+) -> tuple[int, int]:
+    """Copy the kept pictures into a folder named after who sent them.
+
+    Streamed rather than buffered. The database is a few hundred kilobytes and
+    fits in memory comfortably; an archive of photographs does not, and reading
+    one into a bytes object to unpack it is how a report kills the machine it is
+    run on.
+    """
+    plan = export_plan(stats, into)
+    if not plan:
+        return 0, 0
+
+    destinations = dict(plan)
+    if remote is None:
+        return _copy_local(destinations, Path(root))
+
+    argv = [*remote, shlex.join(archive_tar_command(root, list(destinations)))]
+    print(f"fetching {len(destinations)} files …", file=sys.stderr)
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    written = missing = 0
+    try:
+        landed: dict[str, Path] = {}
+        with tarfile.open(fileobj=process.stdout, mode="r|") as bundle:
+            for member in bundle:
+                target = destinations.get(member.name)
+                if target is None:
+                    continue  # not in the plan: the far end does not choose
+                target.parent.mkdir(parents=True, exist_ok=True)
+
+                # The archive is built out of hard links, and tar stores the
+                # second and later names of one inode as a *link* member with no
+                # payload. Treating those as "not a file" silently dropped every
+                # picture that had been sent more than once — which is exactly
+                # the case the archive is designed around.
+                if member.islnk():
+                    already = landed.get(member.linkname)
+                    if already is None:
+                        continue
+                    shutil.copyfile(already, target)
+                    written += 1
+                    continue
+                if not member.isfile():
+                    continue
+                source = bundle.extractfile(member)
+                if source is None:
+                    continue
+                with target.open("wb") as handle:
+                    shutil.copyfileobj(source, handle)
+                landed[member.name] = target
+                written += 1
+    finally:
+        if process.stdout:
+            process.stdout.close()
+        process.wait()
+    missing = len(destinations) - written
+    return written, missing
+
+
+def _copy_local(destinations: dict[str, Path], root: Path) -> tuple[int, int]:
+    written = missing = 0
+    for rel, target in destinations.items():
+        source = _under(root, rel)
+        # `_under` answers "is this path allowed", not "is it there". A file the
+        # retention sweep has already removed is an ordinary outcome, and the
+        # count is what tells the operator it happened.
+        if source is None or not source.is_file():
+            missing += 1
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        written += 1
+    return written, missing
+
+
 # ------------------------------------------------------------------- exporting
 
 ROSTER_COLUMNS = (
@@ -1951,6 +2117,12 @@ def build_parser() -> argparse.ArgumentParser:
     output.add_argument(
         "--csv-photos", type=Path, metavar="PATH", help="write one row per picture as CSV"
     )
+    output.add_argument(
+        "--export",
+        type=Path,
+        metavar="DIR",
+        help="copy the kept pictures here, into a folder per sender",
+    )
     output.add_argument("--photos", action="store_true", help="print the picture ledger and stop")
     output.add_argument(
         "--limit",
@@ -1995,6 +2167,10 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="findpic-stats-") as scratch:
         workspace = Path(scratch)
         command = volume_command(args.volume, args.image)
+        # How to reach the *files*, which is not the same as how to reach the
+        # database: the archive is a bind mount on the host, not inside the
+        # volume. None means the files are on this machine already.
+        fetcher: list[str] | None = None
         if args.docker:
             source = f"docker volume {args.volume}"
             database = pull(command, workspace, source, args.volume)
@@ -2008,6 +2184,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.ssh_port:
                 ssh += ["-p", str(args.ssh_port)]
             database = pull([*ssh, args.ssh, shlex.join(command)], workspace, source, args.volume)
+            fetcher = [*ssh, args.ssh]
         else:
             live = args.db or find_database()
             source = str(live)
@@ -2030,6 +2207,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.csv_photos:
         write_photo_csv(stats, args.csv_photos)
         print(f"wrote {args.csv_photos} ({len(stats['photos_log'])} pictures)", file=sys.stderr)
+
+    if args.export:
+        # Every filter applies, so `--user @someone --export DIR` fetches one
+        # person's pictures and nothing else.
+        root = args.archive or stats.get("archive_dir")
+        if not root:
+            raise SystemExit(
+                "the archive root is not known — the bot records it once it has "
+                "archiving on. Pass --archive PATH."
+            )
+        written, missing = export_photos(
+            stats, args.export, root=str(root), remote=fetcher
+        )
+        print(
+            f"exported {written} pictures to {args.export}"
+            + (f" ({missing} could not be fetched)" if missing else ""),
+            file=sys.stderr,
+        )
 
     if args.json:
         print(json.dumps(stats, indent=2, default=str))

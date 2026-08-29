@@ -205,7 +205,11 @@ async def run(config: Config) -> None:
             logger.info("archiving to %s", config.archive_dir)
         # So the report can resolve rel_path even when it is reading this
         # database on somebody's laptop, a long way from the disk it describes.
+        # Both paths: the container's, and the host's, which is the one anything
+        # outside this process can actually open.
         await storage.remember_setting("archive_dir", str(config.archive_dir))
+        if config.archive_host_dir:
+            await storage.remember_setting("archive_host_dir", config.archive_host_dir)
 
     session = build_session(config)
     bot = Bot(
