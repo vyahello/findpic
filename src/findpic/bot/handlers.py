@@ -504,28 +504,34 @@ async def _analyse_and_reply(
         return
 
     offer_clean = _worth_cleaning(report) and not compressed
-    photo_id = await _quietly(
-        storage.record_photo(
-            build_photo_record(
-                report,
-                user_id=message.from_user.id,
-                event_id=event_id,
-                chat_type=message.chat.type,
-                compressed=compressed,
-                mime_type=mime_type,
-                claimed_name=None if compressed else file_name,
-                clean_offered=offer_clean,
-                duration_ms=int((time.monotonic() - started) * 1000),
-                capture=config.keeps_capture,
-                # Recorded even when the archive refused. An archive whose
-                # failures are invisible is worse than none: the operator would
-                # believe pictures were being kept and find out only when they
-                # went looking for one.
-                stored=analysis.stored,
-            )
-        ),
-        "record the photo",
-    )
+    # ANALYTICS=0 is documented as "the bot writes nothing but the language
+    # preference", and /privacy tells users the same. The photo ledger is the
+    # most detailed thing the bot records, so it has to obey that switch before
+    # anything else does.
+    photo_id = None
+    if config.analytics:
+        photo_id = await _quietly(
+            storage.record_photo(
+                build_photo_record(
+                    report,
+                    user_id=message.from_user.id,
+                    event_id=event_id,
+                    chat_type=message.chat.type,
+                    compressed=compressed,
+                    mime_type=mime_type,
+                    claimed_name=None if compressed else file_name,
+                    clean_offered=offer_clean,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    capture=config.keeps_capture,
+                    # Recorded even when the archive refused. An archive whose
+                    # failures are invisible is worse than none: the operator
+                    # would believe pictures were being kept and find out only
+                    # when they went looking for one.
+                    stored=analysis.stored,
+                )
+            ),
+            "record the photo",
+        )
 
     token = await _quietly(
         storage.remember_analysis(

@@ -141,7 +141,12 @@ async def cleanup_loop(storage: Storage, config: Config) -> None:
         try:
             removed = await storage.purge_expired(time.time() - config.analysis_ttl_seconds)
             await storage.purge_old_usage()
-            forgotten = await storage.purge_old_events(config.analytics_retention_days)
+            forgotten, stranded = await storage.purge_old_events(config.analytics_retention_days)
+            # Their rows are gone, so nothing else will ever find these files.
+            if stranded and config.archiving:
+                store = Archive(config.archive_dir)
+                for rel_path in stranded:
+                    await asyncio.to_thread(store.discard, rel_path)
             # Deliberately outside any `keep_days <= 0` guard on the analytics
             # side: "keep the usage log forever" is a documented option, and it
             # must not silently disable the archive's own, separate clock.

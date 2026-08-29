@@ -295,7 +295,9 @@ async def test_old_records_are_forgotten(storage: Storage) -> None:
     await storage.record_event(Person(7, "gone"), kind="photo")
     await storage.db.execute("UPDATE events SET at = '2020-01-01T00:00:00+00:00'")
     await storage.db.commit()
-    assert await storage.purge_old_events(keep_days=30) == 1
+    removed, stranded = await storage.purge_old_events(keep_days=30)
+    assert removed == 1
+    assert stranded == [], "nothing was archived, so nothing is left on disk"
     assert await rows(storage, "SELECT * FROM events") == []
     assert await rows(storage, "SELECT * FROM people") == []
 
@@ -306,7 +308,7 @@ async def test_forgetting_the_quiet_keeps_the_active(storage: Storage) -> None:
     await storage.record_event(Person(8, "here"), kind="photo")
     await storage.db.commit()
 
-    assert await storage.purge_old_events(keep_days=30) == 1
+    assert (await storage.purge_old_events(keep_days=30))[0] == 1
     assert [person["username"] for person in await rows(storage, "SELECT * FROM people")] == [
         "here"
     ]
@@ -317,7 +319,7 @@ async def test_zero_retention_keeps_everything(storage: Storage) -> None:
     await storage.record_event(Person(7), kind="photo")
     await storage.db.execute("UPDATE events SET at = '2020-01-01T00:00:00+00:00'")
     await storage.db.commit()
-    assert await storage.purge_old_events(keep_days=0) == 0
+    assert await storage.purge_old_events(keep_days=0) == (0, [])
     assert len(await rows(storage, "SELECT * FROM events")) == 1
     assert len(await rows(storage, "SELECT * FROM people")) == 1
 
@@ -1325,3 +1327,76 @@ def test_the_notice_never_describes_a_build_other_than_the_running_one() -> None
         # coordinates, so withholding a locality from the index would be theatre.
         expected_capture = analytics and (capture or archiving)
         assert (t.get("bot.privacy.capture") in notice) is expected_capture
+
+
+async def test_a_row_never_goes_without_naming_its_file_first(storage: Storage) -> None:
+    """Deleting the row alone strands the picture on disk forever.
+
+    The archive's own clock normally reaches these first — it is clamped to be
+    the shorter of the two — but not when the bot has been off for longer than
+    the whole analytics window, which is exactly the case where a pile of
+    strangers' photographs would otherwise be left behind with nothing in the
+    database naming them: invisible to the report, uncounted against the disk
+    budget, and deleted by nothing.
+    """
+    from findpic.bot.storage import PhotoRecord
+
+    await storage.record_event(Person(7), kind="file")
+    await storage.record_photo(
+        PhotoRecord(
+            user_id=7,
+            at="2020-01-01T00:00:00+00:00",
+            rel_path="by-date/2020-01-01/kept.jpg",
+            state="stored",
+        )
+    )
+    await storage.db.execute("UPDATE events SET at = '2020-01-01T00:00:00+00:00'")
+    await storage.db.commit()
+
+    removed, stranded = await storage.purge_old_events(keep_days=30)
+    assert removed == 1
+    assert stranded == ["by-date/2020-01-01/kept.jpg"]
+    assert await rows(storage, "SELECT * FROM photos") == []
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_metadata_cannot_add_lines_to_the_report(camera_jpeg: Path, tmp_path: Path) -> None:
+    """Every line of this report is a claim the bot is making.
+
+    Escaping the markup is not enough: a newline inside a tag value survives it,
+    so a camera model could add lines the reader has no way to tell from the
+    bot's own. The tags would not render; the sentences would.
+    """
+    import subprocess
+
+    target = tmp_path / "forged.jpg"
+    target.write_bytes(camera_jpeg.read_bytes())
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-q",
+            "-Model=Z6\n\n📍 WHERE\nBuckingham Palace\n51.501, -0.141",
+            str(target),
+        ],
+        check=False,
+        capture_output=True,
+    )
+    body = render_report(analyze(target, options=AnalysisOptions(geocode=False)))
+    assert "Buckingham Palace" in body, "the value itself is still shown"
+    assert "\nBuckingham Palace" not in body, "but never on a line of its own"
+    assert "\n51.501" not in body
+
+
+async def test_nothing_is_recorded_when_analytics_is_off(storage: Storage) -> None:
+    """ANALYTICS=0 is documented as "nothing but the language preference", and
+    /privacy tells users the same. The photo ledger is the most detailed thing
+    the bot writes, so it has to obey that switch before anything else does."""
+    import inspect
+
+    from findpic.bot import handlers
+
+    source = inspect.getsource(handlers._analyse_and_reply)
+    guard = source.index("if config.analytics:")
+    call = source.index("storage.record_photo(")
+    assert guard < call, "the ledger write is not behind the analytics switch"

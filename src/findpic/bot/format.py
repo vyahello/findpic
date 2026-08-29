@@ -97,8 +97,22 @@ ALREADY_SHOWN = {
 
 
 def esc(value: object) -> str:
-    """HTML-escape anything before it reaches a Telegram message."""
-    return escape(str(value), quote=False)
+    """Make a metadata value safe to put in a message.
+
+    Escaping the markup is not enough on its own. A newline inside a tag value
+    survives it, and every line of this report is a claim the bot is making —
+    so a camera model containing "\n\n📍 WHERE\nBuckingham Palace" adds lines
+    to the report that the reader has no way to tell from the bot's own. The
+    tags would not render, but the sentences would.
+
+    So line structure belongs to the renderer and never to the data: newlines
+    and other control whitespace collapse to a space, the way the terminal
+    report's own sanitiser has always treated them.
+    """
+    text = str(value)
+    if any(character in text for character in "\n\r\t\v\f"):
+        text = " ".join(text.split())
+    return escape(text, quote=False)
 
 
 def _note(note: Note | None, translator: Translator) -> str | None:

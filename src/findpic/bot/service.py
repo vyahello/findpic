@@ -99,6 +99,15 @@ class CleanResult:
     lost: tuple[str, ...]
 
 
+def _discard(local: Path) -> None:
+    """Remove the working copy and the directory it was alone in.
+
+    Unlinking the file alone would leave an empty directory per request on a
+    512 MB tmpfs, which is memory that only a restart reclaims.
+    """
+    shutil.rmtree(local.parent, ignore_errors=True)
+
+
 def _what_left(before: Metadata | None, after: Metadata | None) -> tuple[str, ...]:
     """Which categories of identifying metadata the strip actually removed."""
     if before is None or after is None:
@@ -146,7 +155,16 @@ class AnalysisService:
         # and a NUL byte in it raises ValueError from inside the C layer — not
         # an OSError, so it escapes every handler written to expect one.
         suffix = safe_suffix(file_name, "") or safe_suffix(file.file_path, ".bin")
-        target = self.config.work_dir / f"{uuid.uuid4().hex}{suffix}"
+        # A directory per request, not a filename per request. The analysis
+        # renames this file to the name its *sender* chose, because filename
+        # findings would otherwise be nonsense — and two people sending
+        # "photo.jpg" at the same moment then resolved to one path in a shared
+        # directory. The second move overwrote the first, and the first sender
+        # was shown an analysis of the second sender's photograph. With the
+        # archive on, that picture would also have been filed under their id.
+        room = self.config.work_dir / uuid.uuid4().hex
+        room.mkdir(parents=True, exist_ok=True)
+        target = room / f"upload{suffix}"
 
         # From here on the file may exist on disk, so every exit has to remove
         # it. work_dir is a RAM-backed tmpfs in production: a partial copy left
@@ -181,7 +199,7 @@ class AnalysisService:
             await bot.download_file(file.file_path, destination=target)
             return target, server_path
         except BaseException:
-            target.unlink(missing_ok=True)
+            shutil.rmtree(room, ignore_errors=True)
             raise
 
     def _delete_source(self, server_path: Path | None) -> None:
@@ -253,7 +271,7 @@ class AnalysisService:
             )
             return Analysis(report=report, stored=stored)
         finally:
-            local.unlink(missing_ok=True)
+            _discard(local)
             self._delete_source(server_path)
 
     # ----------------------------------------------------------------- clean
@@ -289,7 +307,7 @@ class AnalysisService:
         finally:
             if cleaned is not None:
                 cleaned.unlink(missing_ok=True)
-            local.unlink(missing_ok=True)
+            _discard(local)
             self._delete_source(server_path)
 
     async def backup(self, *, bot: Bot, file_id: str, file_name: str) -> tuple[bytes, str]:
@@ -306,7 +324,7 @@ class AnalysisService:
             sidecar.unlink(missing_ok=True)
             return data, f"{display_name(file_name)}{SIDECAR_SUFFIX}"
         finally:
-            local.unlink(missing_ok=True)
+            _discard(local)
             self._delete_source(server_path)
 
     def _sidecar(self, source: Path) -> Path:

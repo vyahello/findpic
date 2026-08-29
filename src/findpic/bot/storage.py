@@ -823,7 +823,7 @@ class Storage:
             row = await cursor.fetchone()
         return int(row["held"]) if row else 0
 
-    async def purge_old_events(self, keep_days: int) -> int:
+    async def purge_old_events(self, keep_days: int) -> tuple[int, list[str]]:
         """Forget interactions older than the retention window.
 
         The account row goes with the last of its interactions. Keeping a name,
@@ -837,10 +837,22 @@ class Storage:
         operator has to make deliberately in the configuration.
         """
         if keep_days <= 0:
-            return 0
+            return 0, []
         cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=keep_days)).isoformat(
             timespec="seconds"
         )
+        # Any kept picture that is about to lose its row, so the caller can
+        # unlink the file first. Deleting the row alone strands the photograph
+        # on disk with nothing in the database naming it — invisible to the
+        # report, uncounted against the disk budget, and never deleted by
+        # anything. The archive's own clock normally reaches these first; it
+        # does not when the bot has been off for longer than the window.
+        async with self.db.execute(
+            "SELECT rel_path FROM photos WHERE at < ? AND rel_path IS NOT NULL",
+            (cutoff,),
+        ) as cursor:
+            stranded = [row["rel_path"] for row in await cursor.fetchall()]
+
         cursor = await self.db.execute("DELETE FROM events WHERE at < ?", (cutoff,))
         removed = cursor.rowcount or 0
         await self.db.execute("DELETE FROM photos WHERE at < ?", (cutoff,))
@@ -855,4 +867,4 @@ class Storage:
                 "   AND user_id NOT IN (SELECT user_id FROM photos)"
             )
         await self.db.commit()
-        return removed
+        return removed, stranded
