@@ -382,12 +382,24 @@ class Archive:
             return 0
 
     def _blob_for(self, link: Path) -> Path | None:
-        """The content-addressed copy a browsable name points at."""
-        stem = link.stem.split("-")
-        digest = stem[-1] if stem else ""
-        # The by-date name carries only eight hex characters, so the blob is
-        # found by its own directory fan-out rather than by reconstruction.
-        if len(digest) != 8:
+        """The content-addressed copy a browsable name points at.
+
+        The name is ``{stamp}-u{user_id}-{digest8}`` with an optional ``-NN``
+        collision counter, so the digest is the **third** field and not the last
+        one. Taking the last was wrong in exactly the case the counter exists
+        for: a second send inside the same second produced ``…-3f9a2c1b-01.jpg``,
+        whose last field is ``01``, so eviction could not find the blob and
+        leaked its bytes permanently. An admin is exempt from the throttle, so
+        for the operator's own account that is ordinary rather than a race.
+
+        Only eight hex characters are in the name, so the blob is found through
+        the directory fan-out rather than reconstructed.
+        """
+        fields = link.stem.split("-")
+        if len(fields) < 3:
+            return None
+        digest = fields[2]
+        if len(digest) != 8 or any(character not in "0123456789abcdef" for character in digest):
             return None
         bucket = self.root / OBJECTS / digest[:2] / digest[2:4]
         if not bucket.is_dir():

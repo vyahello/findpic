@@ -1122,6 +1122,25 @@ def test_evicting_one_send_keeps_the_other_persons_picture(archive, tmp_path: Pa
     assert not list((archive.root / "objects").rglob("*.jpg"))
 
 
+def test_a_collision_suffixed_name_can_still_find_its_bytes(archive, tmp_path: Path) -> None:
+    """The counter exists for the same-second case, and broke eviction for it.
+
+    The digest is the third field of the name, not the last: with a `-01`
+    counter appended, taking the last field yielded "01", the blob was never
+    found, and its bytes leaked permanently — defeating both the retention
+    window and the disk cap for exactly the account that is exempt from the
+    throttle and so hits this routinely.
+    """
+    source = a_photo(tmp_path)
+    sends = [archive.store(source, user_id=7, when="20260829T134501Z") for _ in range(3)]
+    assert len({send.rel_path for send in sends}) == 3
+
+    freed = [archive.discard(send.rel_path) for send in sends]
+    assert freed[:2] == [0, 0], "the bytes are still referenced"
+    assert freed[2] > 0, "the last reference must free them"
+    assert not list((archive.root / "objects").rglob("*.jpg")), "a blob was orphaned"
+
+
 def test_no_sender_chosen_text_ever_reaches_a_path(archive, tmp_path: Path) -> None:
     """Traversal, NUL bytes and overrides are impossible here by construction."""
     source = a_photo(tmp_path, "innocent.jpg")
