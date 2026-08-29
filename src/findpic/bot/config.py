@@ -41,6 +41,19 @@ def _env_ids(name: str) -> frozenset[int]:
     return frozenset(ids)
 
 
+def _archive_retention() -> int:
+    """How long a kept picture is kept, never longer than its own row.
+
+    Past the analytics window the person's name is deleted, so a picture that
+    outlived it would be a stranger's photograph that no report can attribute —
+    worse than not keeping it. 0 on the analytics side means "keep forever",
+    which imposes no ceiling at all.
+    """
+    days = _env_int("ARCHIVE_RETENTION_DAYS", 30)
+    analytics = _env_int("ANALYTICS_RETENTION_DAYS", 90)
+    return min(days, analytics) if analytics > 0 else days
+
+
 class ConfigError(RuntimeError):
     """The bot cannot start with the configuration it was given."""
 
@@ -130,6 +143,32 @@ class Config:
     #: How long that record is kept. 0 keeps it forever, which is a decision
     #: rather than a default.
     analytics_retention_days: int = 90
+    #: Also record the day a photo was taken and the town it was taken in —
+    #: never the exact second, never a street address, never a precise
+    #: coordinate. Off by default: with no archive, the bot can say truthfully
+    #: that it never records where a picture was taken, and that is worth more
+    #: than the column. Implied by archiving, where the whole file is kept.
+    analytics_capture: bool = False
+
+    #: Where received pictures are kept, or None to keep none. A bind mount in
+    #: production, so the operator can `ls` and `scp` them without docker and
+    #: without root — which is the entire point of keeping them.
+    archive_dir: Path | None = None
+    #: Refuse to archive anything larger. Analysis still happens; only the copy
+    #: is skipped, and the row says so.
+    archive_max_file_bytes: int = 32 * 1024 * 1024
+    #: Total bytes of distinct pictures. Oldest are evicted past this.
+    archive_max_total_bytes: int = 4 * 1024 * 1024 * 1024
+    #: Per person, so one enthusiast cannot fill the disk on their own. Note
+    #: that an admin bypasses the throttle and the daily quota entirely, so for
+    #: the operator's own account this is the only ceiling there is.
+    archive_max_user_bytes: int = 512 * 1024 * 1024
+    #: Stop archiving when the filesystem has less than this free. The first
+    #: thing a full disk breaks is the write the bot needs to answer anyone.
+    archive_min_free_bytes: int = 2 * 1024 * 1024 * 1024
+    #: How long a kept picture is kept. Clamped to the analytics window when
+    #: that is shorter, so a file can never outlive the row that says whose it is.
+    archive_retention_days: int = 30
 
     database_path: Path = Path("/data/findpic-bot.sqlite3")
     work_dir: Path = Path("/tmp/findpic")
@@ -139,6 +178,19 @@ class Config:
 
     log_level: str = "INFO"
     drop_pending_updates: bool = True
+
+    @property
+    def archiving(self) -> bool:
+        return self.archive_dir is not None
+
+    @property
+    def keeps_capture(self) -> bool:
+        """Whether a photo's date and town are recorded.
+
+        Implied by archiving: the file on disk holds the exact coordinates, so
+        withholding a coarse locality from the index would be theatre.
+        """
+        return self.analytics and (self.analytics_capture or self.archiving)
 
     @property
     def is_public(self) -> bool:
@@ -168,6 +220,9 @@ class Config:
         if ":" not in token:
             raise ConfigError("BOT_TOKEN does not look like a Telegram bot token.")
 
+        archive_raw = os.environ.get("ARCHIVE_DIR", "").strip()
+        archive_dir = Path(archive_raw) if archive_raw else None
+
         api_base = os.environ.get("BOT_API_BASE", "").strip().rstrip("/")
         api_is_local = _env_bool("BOT_API_IS_LOCAL", bool(api_base))
 
@@ -190,6 +245,13 @@ class Config:
             daily_quota=_env_int("DAILY_QUOTA", 50),
             analytics=_env_bool("ANALYTICS", True),
             analytics_retention_days=_env_int("ANALYTICS_RETENTION_DAYS", 90),
+            analytics_capture=_env_bool("ANALYTICS_CAPTURE", False),
+            archive_dir=archive_dir,
+            archive_max_file_bytes=_env_int("ARCHIVE_MAX_FILE_MB", 32) * 1024 * 1024,
+            archive_max_total_bytes=_env_int("ARCHIVE_MAX_TOTAL_MB", 4096) * 1024 * 1024,
+            archive_max_user_bytes=_env_int("ARCHIVE_MAX_USER_MB", 512) * 1024 * 1024,
+            archive_min_free_bytes=_env_int("ARCHIVE_MIN_FREE_MB", 2048) * 1024 * 1024,
+            archive_retention_days=_archive_retention(),
             database_path=Path(os.environ.get("DATABASE_PATH", "/data/findpic-bot.sqlite3")),
             work_dir=Path(os.environ.get("WORK_DIR", "/tmp/findpic")),
             delete_source_files=_env_bool("DELETE_SOURCE_FILES", True),
@@ -213,9 +275,29 @@ class Config:
             stats = f"{self.analytics_retention_days}d"
         else:
             stats = "kept forever"
-        return (
+        archive = "off"
+        if self.archiving:
+            keep = (
+                f"{self.archive_retention_days}d"
+                if self.archive_retention_days > 0
+                else "kept forever"
+            )
+            archive = (
+                f"{self.archive_dir} (≤{self.archive_max_total_bytes // 1024 // 1024}MB, {keep})"
+            )
+        line = (
             f"uid={os.getuid()} · endpoint={endpoint} ({mode}) · access={access} · "
             f"max_file={self.max_file_bytes // 1024 // 1024}MB · "
             f"quota={self.daily_quota}/day · throttle={self.throttle_seconds}s · "
-            f"analytics={stats}"
+            f"analytics={stats} · archive={archive}"
         )
+        if self.archiving and self.is_public:
+            # Not refused — it is the operator's server and their decision — but
+            # never allowed to be an accident. A bot that keeps every picture is
+            # a different proposition when anyone in the world can send one.
+            line += (
+                "\n  NOTE: this bot is open to everyone AND keeps a copy of every "
+                "picture sent to it. Set ALLOWED_USER_IDS to restrict it, or "
+                "ARCHIVE_DIR= to stop keeping copies."
+            )
+        return line

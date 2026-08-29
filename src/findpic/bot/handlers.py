@@ -14,6 +14,8 @@ after — why there is nothing to see and how to get a real answer.
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
+import json
 import logging
 import time
 from collections.abc import Awaitable
@@ -28,9 +30,10 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from ..exif import ExifTool, ExifToolError
 from ..i18n import LANGUAGE_NAMES, Translator
 from ..models import Category, Report, Severity
+from ..util import parse_exif_datetime
 from .config import Config
 from .filenames import IMAGE_SUFFIXES
-from .format import esc, render_report, render_tag_dump
+from .format import esc, render_report, render_tag_dump, report_is_stripped
 from .keyboards import (
     AnalysisCallback,
     LanguageCallback,
@@ -41,7 +44,7 @@ from .keyboards import (
     report_keyboard,
 )
 from .service import AnalysisService, CleanResult
-from .storage import QuotaVerdict, Storage
+from .storage import PhotoRecord, QuotaVerdict, Storage
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +336,7 @@ async def handle_document(
         file_name=document.file_name or f"file_{document.file_unique_id}",
         file_size=document.file_size or 0,
         compressed=False,
+        mime_type=document.mime_type,
         event_id=event_id,
         quota=quota,
     )
@@ -363,6 +367,7 @@ async def _analyse_and_reply(
     file_name: str,
     file_size: int,
     compressed: bool,
+    mime_type: str | None = None,
     event_id: int | None = None,
     quota: QuotaVerdict | None = None,
 ) -> None:
@@ -373,6 +378,7 @@ async def _analyse_and_reply(
 
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
+    started = time.monotonic()
     try:
         report = await service.analyse(
             bot=bot, file_id=file_id, file_name=file_name, language=t.language
@@ -390,13 +396,31 @@ async def _analyse_and_reply(
         await message.answer(t.get("bot.error.internal"))
         return
 
-    await _note_equipment(storage, event_id, report, compressed=compressed)
+    offer_clean = _worth_cleaning(report) and not compressed
+    photo_id = await _quietly(
+        storage.record_photo(
+            build_photo_record(
+                report,
+                user_id=message.from_user.id,
+                event_id=event_id,
+                chat_type=message.chat.type,
+                compressed=compressed,
+                mime_type=mime_type,
+                claimed_name=None if compressed else file_name,
+                clean_offered=offer_clean,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                capture=config.keeps_capture,
+            )
+        ),
+        "record the photo",
+    )
 
     token = await _quietly(
         storage.remember_analysis(
             user_id=message.from_user.id,
             file_id=file_id,
             file_name=file_name,
+            photo_id=photo_id,
             now=time.time(),
         ),
         "remember the analysis",
@@ -428,10 +452,10 @@ async def _analyse_and_reply(
         reply_markup=report_keyboard(
             t,
             token,
-            offer_clean=_worth_cleaning(report) and not compressed,
+            offer_clean=offer_clean,
             # Never offer to strip a file without offering to keep a copy of
             # what is about to be removed.
-            offer_backup=_worth_cleaning(report) and not compressed,
+            offer_backup=offer_clean,
         ),
         disable_web_page_preview=True,
     )
@@ -451,29 +475,116 @@ def _quota_footer(t: Translator, quota: QuotaVerdict | None) -> str:
     return f"<i>{esc(t.get('bot.quota.footer', used=quota.used, limit=quota.limit))}</i>"
 
 
-async def _note_equipment(
-    storage: Storage, event_id: int | None, report: Report, *, compressed: bool
-) -> None:
-    """Record which camera the photo named, for the operator's own statistics.
+def build_photo_record(
+    report: Report,
+    *,
+    user_id: int,
+    event_id: int | None,
+    chat_type: str | None,
+    compressed: bool,
+    mime_type: str | None,
+    claimed_name: str | None,
+    clean_offered: bool,
+    duration_ms: int,
+    capture: bool,
+) -> PhotoRecord:
+    """One picture's row, from what the analysis actually found.
 
     Telegram tells a bot nothing about the device on the other end — no model,
-    no operating system, no app version. The picture does, when it still has its
-    tags, and that is the only honest source for "what do my users shoot with".
+    no operating system, no app version, no location. The picture does, when it
+    still has its tags, and that is the only honest source for "what do my users
+    shoot with". Everything here is read out of the photograph, which is a
+    different claim from "this is the sender's phone", and the report labels it
+    as one.
 
-    Only the equipment is kept: make, model, OS version, and whether the file
-    arrived compressed or whole. When and where it was taken are not recorded,
-    here or anywhere else.
+    ``capture`` gates the date and the place. Left off, the bot can say
+    truthfully that it never records when or where a picture was taken.
     """
-    device = report.device
-    await storage.note_analysis(
-        event_id,
+    device, image, place = report.device, report.image, report.location
+
+    record = PhotoRecord(
+        user_id=user_id,
+        at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        event_id=event_id,
+        sent_as="photo" if compressed else "file",
+        chat_type=chat_type,
+        file_type=report.file.file_type,
+        mime_type=mime_type,
+        claimed_name=claimed_name,
+        size_bytes=report.file.size_bytes or None,
+        width=image.width,
+        height=image.height,
         make=device.make,
         model=device.model,
-        os_version=device.os,
-        sent_as="photo" if compressed else "file",
-        file_type=report.file.file_type,
-        stripped=not (device.make or device.model) and not report.capture.taken,
+        os=device.os,
+        lens=device.lens_model,
+        editor=device.editor,
+        # Levels, not labels: a label resolves through the message catalogue, so
+        # the same row would read differently depending on who ran the report.
+        originality=_level(report, "originality"),
+        privacy=_level(report, "privacy"),
+        structure=_level(report, "structure"),
+        tag_count=report.tag_count,
+        finding_ids=json.dumps(
+            sorted({finding.id for finding in report.findings}), separators=(",", ":")
+        ),
+        stripped=int(report_is_stripped(report)),
+        had_gps=int(place.present),
+        has_serial=int(bool(device.body_serial or device.lens_serial)),
+        # Written when the keyboard is built, never recomputed: the button is
+        # withheld from every compressed photo regardless of what was found, so
+        # a conversion rate derived from the verdicts would be wrong both ways.
+        clean_offered=int(clean_offered),
+        duration_ms=duration_ms,
+        warnings=len(report.exiftool_warnings),
+        errors=len(report.errors),
     )
+    if capture:
+        _add_capture(record, report)
+    return record
+
+
+def _level(report: Report, axis: str) -> str:
+    verdict = report.verdicts.get(axis)
+    return verdict.level.value if verdict else "unknown"
+
+
+def _add_capture(record: PhotoRecord, report: Report) -> None:
+    """The day and the town, never the second and never the street.
+
+    Two rules that do not bend. The exact capture second and a six-decimal
+    coordinate describe a person's movements to the metre; a date and a locality
+    answer "when and roughly where were these taken" without doing that. And the
+    place is built by skipping the address tier — `location.place` routinely
+    begins with a street name, which is not a locality.
+    """
+    taken = parse_exif_datetime(report.capture.taken) if report.capture.taken else None
+    if taken is not None:
+        record.taken_date = taken.date().isoformat()
+        record.age_days = max(0, (dt.datetime.now(dt.timezone.utc).date() - taken.date()).days)
+    record.taken_offset = report.capture.taken_offset
+
+    location = report.location
+    if location.present:
+        # Two decimal places is about a kilometre. It is meaningful protection
+        # for one photograph and weaker across many from one account, which is
+        # the trade-off the operator is told about in .env.example.
+        record.lat = round(location.latitude, 2)
+        record.lon = round(location.longitude, 2)
+        address = (location.place_detail or {}).get("address") or {}
+        record.country = (address.get("country_code") or "").upper() or None
+        record.place = _locality(address) or None
+
+
+def _locality(address: dict) -> str:
+    """A town and a region out of Nominatim's address parts, never a street."""
+    tiers = (
+        ("village", "town", "city", "municipality", "county"),
+        ("state", "region", "province"),
+        ("country",),
+    )
+    parts = [next((address[key] for key in tier if address.get(key)), None) for tier in tiers]
+    return ", ".join(str(part) for part in parts if part)
 
 
 def _worth_cleaning(report: Report) -> bool:
@@ -501,6 +612,7 @@ async def handle_show_tags(
         await query.answer(t.get("bot.error.expired"), show_alert=True)
         return
 
+    await _quietly(storage.note_photo_action(handle.photo_id, "tags"), "note the tap")
     await query.answer(t.get("bot.status.working"))
     try:
         report = await service.analyse(
@@ -535,6 +647,7 @@ async def handle_backup(
         await query.answer(t.get("bot.error.expired"), show_alert=True)
         return
 
+    await _quietly(storage.note_photo_action(handle.photo_id, "backup"), "note the tap")
     await query.answer(t.get("bot.status.working"))
     await bot.send_chat_action(query.message.chat.id, ChatAction.UPLOAD_DOCUMENT)
     try:
@@ -566,6 +679,7 @@ async def handle_clean_copy(
         await query.answer(t.get("bot.error.expired"), show_alert=True)
         return
 
+    await _quietly(storage.note_photo_action(handle.photo_id, "clean"), "note the tap")
     await query.answer(t.get("bot.status.cleaning"))
     await bot.send_chat_action(query.message.chat.id, ChatAction.UPLOAD_DOCUMENT)
 
