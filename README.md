@@ -296,31 +296,85 @@ the server. It reads the database out of the Docker volume through a throwaway
 container, locally or over ssh, so it needs the docker group rather than root,
 and it always works on a copy rather than the file the bot is writing to.
 
+The sample below is synthetic, from a seeded database — a report about who uses
+a bot should not demonstrate itself on real people's accounts.
+
 ```bash
-scripts/bot-stats.py --docker                        # on the server itself
-scripts/bot-stats.py --ssh you@your.server           # from your laptop
-scripts/bot-stats.py --ssh you@your.server --all     # everything kept
-scripts/bot-stats.py --db bot.sqlite3 --json         # machine-readable
-scripts/bot-stats.py --db bot.sqlite3 --user 1234567 # one account
+scripts/bot-stats.py --docker                     # on the server itself
+scripts/bot-stats.py --ssh you@server --ssh-port 2022    # from your laptop
+scripts/bot-stats.py --docker --photos --limit 0  # every picture, one per line
+scripts/bot-stats.py --docker --user @someone     # one account, in order
+scripts/bot-stats.py --docker --device iphone --with-gps
+scripts/bot-stats.py --docker --failed            # only what went wrong
+scripts/bot-stats.py --docker --csv-photos out.csv --json
 ```
 
 ```
-  14 accounts known · 9 active in this window · 3 new · 6 returning
-  412 interactions · 168 pictures sent · 151 analysed · 80 arrived with no camera in them
+  4 accounts known · 4 of them active, over the whole history
+  92 interactions · 64 pictures sent · 59 analysed · 5 turned away
+  26 arrived with no camera in them
+
+WHAT WAS SENT  59 analysed · 5 turned away · 4 shown
+  when (UTC)  who          camera            os         sent  type found
+  ──────────────────────────────────────────────────────────────────────
+  08-27 14:30 John Doe     Google Pixel 8    Android 14 file  JPEG serial edite…
+  08-27 18:42 John Doe     —                 —          photo JPEG stripped
+  08-27 23:29 John Doe     —                 —          photo JPEG stripped
+  08-29 20:53 Sam          · too_big — file over the size limit
+  … 60 earlier not shown — --limit 0 for all
 
 WHO
-  id          name              username         lang  first seen  last seen    events  photos
-  5829771410  Volodymyr         @vyahello        uk    2026-06-02  2026-08-17      210      98 ★
-  792620422   Оля               —                uk    2026-07-14  2026-08-16       44      19
-
-WHERE  (Telegram gives a bot no location at all)
-  client language   uk 9 · en 4 · pl 1
-  waking hours      UTC+2 8 · UTC+0 1 · unknown 5   guessed from when each person writes, ±1–2h
+  id          name         username     lang  camera              pics  last
+  1002        John Doe     @jdoe        en    Google Pixel 8       22 08-27
+  1004        Sam          @lurker      en    —                    17 08-29
+  1003        Марко        —            uk    samsung SM-S918B     15 08-26
+  1001        Olena K      @olena_k     uk    Apple iPhone 14 P…   10 08-28★
+  ★ Telegram Premium · pics counts what they sent, refusals included
 
 DEVICES  (read out of the photos, not from Telegram)
-  Apple iPhone 13 Pro                   41  17.4.1 (30), 17.3 (11)
-  Google Pixel 7                        18  Android 14 (18)
-  (no camera in the file)               80  stripped before it reached the bot
+  camera                   pics  os                    who
+  Google Pixel 8             14  Android 14 (14)       John Doe (14)
+  samsung SM-S918B           10  One UI 6.1 (10)       Марко (10)
+  Apple iPhone 14 Pro         9  iOS 17.4.1 (9)        Olena K (9)
+  (no camera in the file)    26  stripped before it reached the bot
+
+  how they sent it  as a file 47 · as a photo 12
+  file types        JPEG 44 · HEIC 15
+
+WHAT THE PICTURES WERE
+  originality       unknown 26 · good 18 · fair 10 · poor 5
+  privacy           good 26 · poor 14 · fair 11 · bad 8
+  structure         good 59
+  most found        platform.stripped 37 · privacy.gps_location 22
+  carried           22 with GPS · 11 with a serial · 26 already stripped
+  buttons pressed   clean offered on 33 → tags 5 · clean 5 · backup 3
+  analysis took     median 1.1 s · slowest 2.4 s
+  file size         median 5.4 MB · largest 7.4 MB
+  tags per photo    median 122 · most 186
+
+WHERE THE PICTURES WERE TAKEN  (from the photo's own tags)
+  countries         US 8 · PL 7 · UA 7
+  places            Portland, Oregon 8 · Kraków, Lesser Poland 7 · Lviv, Lviv…
+  camera clock      +02:00 19 · -05:00 14
+  26 of 59 carried no capture data at all
+
+TURNED AWAY OR BROKEN
+  quota            4  hit the daily limit         Марко (2), John Doe (1), Sam …
+  too_big          1  file over the size limit    Sam (1)
+
+ARCHIVE  /archive
+  64 sent · 31 kept · 18 over the size limit · 10 already had that file
+  holding 126.1 MB in 31 distinct files · 52.1 MB saved by deduplication
+  oldest 2026-08-06 · newest 2026-08-27
+  2026-08-23 John Doe     by-date/2026-08-23/20260823T233900Z-u1002-8…    3.9 MB
+  2026-08-25 Olena K      by-date/2026-08-25/20260825T074900Z-u1001-1…    6.0 MB
+  2026-08-26 John Doe     by-date/2026-08-26/20260826T013300Z-u1002-0…    7.5 MB
+  2026-08-26 John Doe     by-date/2026-08-26/20260826T153700Z-u1002-d…    4.5 MB
+  2026-08-26 Марко        by-date/2026-08-26/20260826T180700Z-u1003-c…    2.9 MB
+  2026-08-26 Sam          by-date/2026-08-26/20260826T214200Z-u1004-b…    5.2 MB
+  2026-08-27 Sam          by-date/2026-08-27/20260827T095700Z-u1004-e…    2.8 MB
+  2026-08-27 John Doe     by-date/2026-08-27/20260827T184200Z-u1002-c…    2.4 MB
+  … 33 more kept files — --csv-photos lists them all
 ```
 
 ### Keeping the photos
