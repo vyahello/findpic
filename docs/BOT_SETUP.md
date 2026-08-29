@@ -167,7 +167,7 @@ values in a workflow log is what you want when a deploy goes wrong.
 
 | Variable | Effect |
 |---|---|
-| `VPS_SSH_PORT` | The port sshd listens on. Defaults to 22; set it if yours moved, or every deploy fails with `connection refused` and nothing else to go on. |
+| `VPS_SSH_PORT` | The port sshd listens on. Defaults to 22; set it if yours is elsewhere, or every deploy fails with `connection refused` and nothing else to go on. A variable rather than a secret because GitHub will not mask it in a log either way — if you would rather it were not readable at all, make it a secret and reference it as `secrets.VPS_SSH_PORT`. |
 | `ARCHIVE_DIR` | Set to `/archive` to keep a copy of every picture the bot receives, under `~/findpic-archive` on the server. Empty (the default) keeps none. **Turning this on rewrites what `/privacy` tells your users, in both languages** — read it once afterwards. |
 | `ANALYTICS` | `0` stops the bot recording who used it. Default `1`. |
 | `ANALYTICS_RETENTION_DAYS` | How long that record is kept. `0` keeps it forever, which is a decision rather than a default. |
@@ -199,9 +199,12 @@ the stack. It then greps the log for a successful `getMe` — a container can si
 
 ### Checking on it
 
+The host, the account and the port are in your repository secrets and
+variables, not here — this file is public.
+
 ```bash
-ssh cax@178.105.143.68
-cd /home/cax/findpic/deploy
+ssh you@your-server            # add -p <port> if sshd is not on 22
+cd ~/findpic/deploy
 
 docker compose ps
 docker compose logs -f bot

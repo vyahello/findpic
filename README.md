@@ -301,12 +301,13 @@ a bot should not demonstrate itself on real people's accounts.
 
 ```bash
 scripts/bot-stats.py --docker                     # on the server itself
-scripts/bot-stats.py --ssh you@server --ssh-port 2022    # from your laptop
+scripts/bot-stats.py --ssh you@server              # from your laptop
 scripts/bot-stats.py --docker --photos --limit 0  # every picture, one per line
 scripts/bot-stats.py --docker --user @someone     # one account, in order
 scripts/bot-stats.py --docker --device iphone --with-gps
 scripts/bot-stats.py --docker --failed            # only what went wrong
 scripts/bot-stats.py --docker --csv-photos out.csv --json
+#   --ssh-port N, or FINDPIC_BOT_PORT, when sshd is not on 22
 ```
 
 ```
@@ -413,6 +414,25 @@ that the sender's name is deleted and a photograph nobody can attribute is worse
 than no photograph. Nothing in the archive can fail an analysis: every outcome,
 including the refusals, is a row with a state, since an archive whose failures
 are invisible is worse than none.
+
+**Looking at them** needs no docker and no root — that is the whole reason for
+the bind mount:
+
+```bash
+ls -lt ~/findpic-archive/by-date/2026-08-29/     # newest first
+scp -r you@server:~/findpic-archive/by-date/2026-08-29 .   # pull a day down
+```
+
+The report ties a file back to who sent it and what was found in it:
+
+```bash
+scripts/bot-stats.py --docker --photos --limit 0   # every picture, one per line
+scripts/bot-stats.py --docker --user @someone      # one person's, in order
+scripts/bot-stats.py --docker --csv-photos out.csv # the lot, for a spreadsheet
+```
+
+Each row carries the path, so `grep` on the first eight hex of the digest joins
+a file on disk to its row and its report line.
 
 **Turning it on rewrites `/privacy`, in both languages**, and adds `/forget` —
 which deletes every picture that person sent and everything recorded about them.
