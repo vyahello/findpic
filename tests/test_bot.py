@@ -1488,10 +1488,10 @@ def test_a_bidi_override_cannot_reverse_the_report() -> None:
 
 
 def test_a_one_pixel_image_does_not_claim_zero_megapixels(tmp_path: Path) -> None:
-    import subprocess
+    from tests.conftest import _magick
 
     tiny = tmp_path / "tiny.jpg"
-    subprocess.run(["magick", "-size", "1x1", "xc:red", str(tiny)], check=True)
+    _magick("-size", "1x1", "xc:red", str(tiny))
     body = render_report(analyze(tiny, options=AnalysisOptions(geocode=False)))
     assert "0.0 MP" not in body
 
@@ -1501,8 +1501,10 @@ def test_a_file_with_no_colour_profile_says_nothing_about_one(tmp_path: Path) ->
     stripped photograph ended its report with "Colour profile None"."""
     import subprocess
 
+    from tests.conftest import _magick
+
     plain = tmp_path / "plain.jpg"
-    subprocess.run(["magick", "-size", "40x40", "xc:gray", str(plain)], check=True)
+    _magick("-size", "40x40", "xc:gray", str(plain))
     subprocess.run(
         ["exiftool", "-overwrite_original", "-q", "-icc_profile:all=", str(plain)],
         check=False,
