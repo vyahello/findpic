@@ -85,11 +85,45 @@ def _section(console: Console, title: str, table: Table) -> None:
     console.print(Padding(table, (0, 0, 1, 1)))
 
 
+#: Characters a photograph has no business putting on somebody's terminal.
+#: ESC is the one that matters — it starts every colour, cursor-move and
+#: clear-screen sequence — but a bare CR rewrites the line it is on and a BEL
+#: makes the machine chirp, so the whole control range goes.
+_CONTROL = dict.fromkeys(range(32), " ") | {0x7F: " "}
+#: Bidirectional overrides reverse everything printed after them, which is how
+#: "gpj.exe" is made to read as "exe.jpg". findpic's own rules call the pattern
+#: out as having no legitimate reason; printing it unchallenged in a report
+#: about deception would be an odd thing to do.
+_BIDI = {ord(c): None for c in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"}
+
+
+def safe(value: object) -> Text:
+    """A metadata value, made safe to put on a terminal.
+
+    Two things, both of which a photograph could do to the reader before this.
+
+    A tag value went into ``Table.add_row`` as a plain string, and rich parses
+    a plain string as *markup* — so a ``Software`` tag reading ``[/]`` raised
+    ``MarkupError`` and killed the whole run with a traceback. On a tool whose
+    job is to be pointed at files from strangers, a file that stops it working
+    is a file that wins. Returning ``Text`` is what stops the parse: rich
+    renders it literally.
+
+    And nothing filtered control characters, so a ``LensModel`` of
+    ``\x1b[41m\x1b[2J`` cleared the screen and repainted it. The bot has
+    escaped its output since it was written; the terminal path never did.
+    """
+    return Text(str(value).translate(_CONTROL).translate(_BIDI))
+
+
 def _add(table: Table, label: str, value: object, style: str = "") -> None:
     """Add a row, silently skipping anything empty."""
     if value is None or value == "" or value == []:
         return
-    table.add_row(label, Text(str(value), style=style) if style else str(value))
+    cell = safe(value)
+    if style:
+        cell.stylize(style)
+    table.add_row(label, cell)
 
 
 def render_header(console: Console, report: Report) -> None:

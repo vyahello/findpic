@@ -221,31 +221,43 @@ def apple_os_name(model: str | None) -> str:
 #: Apple's MakerNote is undocumented. exiftool decodes what the community has
 #: pinned down; everything here is community-derived, so callers should present
 #: it as an interpretation and fall back to the raw number when absent.
+#: Apple's ``ImageCaptureType``, again exactly as Apple.pm decodes it.
+#:
+#: exiftool's own comment reads "seen: 1,2,3,4,5,10,12" and its table decodes
+#: only 1, 2, 10, 11 and 12 — 3, 4 and 5 are values that turn up in real files
+#: and whose meaning nobody has pinned down. findpic assigned them meanings
+#: anyway, so samples/IMG_1312.JPG (which carries 5) was reported as a plain
+#: "Photo" on the strength of a guess.
 APPLE_IMAGE_CAPTURE_TYPE: dict[int, str] = {
     1: "proraw",
     2: "portrait",
-    3: "photo",
-    4: "manual_focus",
-    5: "photo",
     10: "photo",
     11: "manual_focus",
     12: "scene",
 }
 
+#: Apple's ``CameraType``, exactly as exiftool's own Apple.pm decodes it:
+#: ``0 => Back Wide Angle, 1 => Back Normal, 6 => Front``.
+#:
+#: findpic had 1 as the front camera and 6 as the ultra-wide — the two that
+#: matter, both inverted — plus 2 and 3 invented outright. It printed
+#: "front camera" on rear-camera photographs and called selfies rear shots,
+#: while the lens string in the same report said the opposite. Nothing else
+#: is added here: a code exiftool declines to decode is a code nobody has
+#: established the meaning of, and guessing in a forensics tool is worse than
+#: staying quiet.
 APPLE_CAMERA_TYPE: dict[int, str] = {
     0: "back_wide",
-    1: "front",
-    2: "back",
-    3: "back_tele",
-    6: "back_ultrawide",
+    1: "back",
+    6: "front",
 }
 
-APPLE_OIS_MODE: dict[int, str] = {
-    0: "Off",
-    1: "On",
-    2: "On",
-    3: "On",
-}
+#: Apple's ``OISMode`` is *not* decoded by exiftool at all — its note says only
+#: "seen: 2,3,5". findpic had a table claiming 0 meant off and everything else
+#: meant on, which is an invention, and nothing read it: the one consumer tested
+#: the tag's mere presence. Kept as a comment rather than a table because the
+#: honest answer is that the tag says the device recorded a stabilisation mode,
+#: not that stabilisation was active.
 
 
 # ---------------------------------------------------- filename provenance hints

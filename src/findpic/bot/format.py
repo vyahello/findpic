@@ -476,6 +476,10 @@ def render_shot(report: Report) -> list[str]:
     if focal:
         lines.append(esc(focal))
 
+    # The tag's *presence*, and nothing more is claimed from it. exiftool does
+    # not decode OISMode ("seen: 2,3,5" is its whole note), so what the value
+    # means is not established — only that the device recorded a stabilisation
+    # mode at all, which is itself a fact about the hardware.
     stabilised = report.raw.get("Apple:OISMode") is not None
     for note in (
         describe_light(capture.light_value),
