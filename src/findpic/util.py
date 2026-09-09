@@ -59,7 +59,14 @@ def printable(value: object) -> str:
     problem — so anything reaching the screen goes through here first, whichever
     renderer it belongs to.
     """
-    return str(value).translate(_CONTROL).translate(_BIDI)
+    text = str(value)
+    # A filename does not have to be valid UTF-8. Python hands those back with
+    # the undecodable bytes as lone surrogates, and writing one raises
+    # UnicodeEncodeError — which killed the run part-way through a listing, with
+    # the files already printed on stdout and every later file never reported.
+    if any("\ud800" <= ch <= "\udfff" for ch in text):
+        text = text.encode("utf-8", "replace").decode("utf-8", "replace")
+    return text.translate(_CONTROL).translate(_BIDI)
 
 
 def human_bytes(size: float) -> str:

@@ -439,8 +439,20 @@ def test_escape_sequences_never_reach_the_terminal(
     main([str(target), *OFFLINE])
     assert "\x1b" not in capsys.readouterr().out
 
+    # --summary piped is the machine-readable mode, and there the path is
+    # emitted exactly as it is on disk so that `cut -f2 | xargs` names the real
+    # file — the same bargain ls and find make when their output is not a
+    # terminal. Every other column is still sanitised, and the aligned mode a
+    # person actually reads sanitises all five.
     main([str(target), "--summary", *OFFLINE])
-    assert "\x1b" not in capsys.readouterr().out
+    row = capsys.readouterr().out.rstrip("\n")
+    columns = row.split("\t")
+    assert len(columns) == 5
+    assert columns[1] == str(target), "the path must be usable"
+    for index, column in enumerate(columns):
+        if index == 1:
+            continue
+        assert "\x1b" not in column, f"column {index}: {column!r}"
 
 
 def test_a_bracketed_filename_is_reported_verbatim(
@@ -590,3 +602,97 @@ def test_a_bidi_filename_is_shown_as_it_really_is(
     out = capsys.readouterr().out
     assert "‮" not in out
     assert "\\u202e" in out
+
+
+def _hostile_dir(tmp_path: Path, source: Path) -> Path:
+    """Copies of one photograph under names a filesystem allows and a terminal
+    should never be handed."""
+    import os
+    import shutil
+
+    room = tmp_path / "hostile"
+    room.mkdir()
+    shutil.copy(source, room / "base.jpg")
+    shutil.copy(source, room / os.fsdecode(b"bad\xff\xfe.jpg"))
+    for name in ("car\rriage.jpg", "es\x1b[31mc.jpg", "bidi‮gpj.exe.jpg", "new\nline.jpg"):
+        shutil.copy(source, room / name)
+    return room
+
+
+def test_summary_survives_every_name_a_filesystem_allows(
+    tmp_path: Path, camera_jpeg: Path, capfdbinary: pytest.CaptureFixture[bytes]
+) -> None:
+    """One file, one line, five columns — including a name that is not valid
+    UTF-8, which used to kill the run part-way through a listing.
+
+    Captured at the file descriptor and as bytes, because the path is written as
+    bytes: a filename is not required to be text.
+    """
+    import os
+
+    room = _hostile_dir(tmp_path, camera_jpeg)
+    expected = len(list(os.scandir(room)))
+    assert main([str(room), "--summary", *OFFLINE]) in (EXIT_OK, EXIT_FINDINGS)
+    rows = [line for line in capfdbinary.readouterr().out.split(b"\n") if line]
+    assert len(rows) == expected
+    for row in rows:
+        assert len(row.split(b"\t")) == 5, repr(row)
+
+
+def test_every_summary_path_names_a_real_file(
+    tmp_path: Path, camera_jpeg: Path, capfdbinary: pytest.CaptureFixture[bytes]
+) -> None:
+    """The piped mode exists to be fed into `cut -f2 | xargs`, so the path is
+    emitted as it is on disk — only the newline and NUL that would break the
+    record format itself are escaped."""
+    import os
+
+    room = _hostile_dir(tmp_path, camera_jpeg)
+    main([str(room), "--summary", *OFFLINE])
+    for row in capfdbinary.readouterr().out.split(b"\n"):
+        if not row:
+            continue
+        path = os.fsdecode(row.split(b"\t")[1])
+        real = path.replace("\\n", "\n").replace("\\0", "\0").replace("\\\\", "\\")
+        assert os.path.exists(real), f"unusable path: {path!r}"
+
+
+def test_force_color_does_not_defeat_the_piped_form(
+    tmp_path: Path,
+    camera_jpeg: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """rich reports a terminal whenever FORCE_COLOR is set — the normal state on
+    CI runners — so `--summary | awk -F'\\t'` got coloured fixed-width basenames
+    and not one tab."""
+    import shutil
+
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    target = tmp_path / "photo.jpg"
+    shutil.copy(camera_jpeg, target)
+    main([str(target), "--summary", *OFFLINE])
+    out = capsys.readouterr().out
+    assert out.count("\t") == 4, repr(out)
+    assert "\x1b" not in out
+
+
+@pytest.mark.parametrize("width", ["-5", "0", "3"])
+def test_an_impossible_width_is_refused(
+    width: str, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It silently produced zero rows and still exited 1, which is
+    indistinguishable from a run that found something."""
+    assert main([str(camera_jpeg), "--summary", "--width", width, *OFFLINE]) == EXIT_ERROR
+    assert "--width" in capsys.readouterr().err
+
+
+def test_the_place_column_is_never_silently_shortened(
+    gps_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Cropping turned "48.858400, 2.294500" into "48.858400, 2.2" — a
+    well-formed coordinate fifty kilometres from the truth."""
+    main([str(gps_jpeg), "--summary", "--width", "60", *OFFLINE])
+    row = capsys.readouterr().out.rstrip("\n")
+    coordinates = row.split("\t")[-1] if "\t" in row else row
+    assert "48.858400" in coordinates or "…" in coordinates

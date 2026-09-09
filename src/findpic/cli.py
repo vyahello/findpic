@@ -27,6 +27,9 @@ from .util import printable
 #: this keeps its width for everything else; the report just stops growing.
 MAX_WIDTH = 100
 
+#: Narrower than this and there is no room for a label and a value.
+MIN_WIDTH = 20
+
 IMAGE_SUFFIXES = {
     ".jpg",
     ".jpeg",
@@ -224,53 +227,88 @@ def _col(text: str, width: int) -> str:
     return set_cell_size(text, width - 1) + "…"
 
 
-def summary_line(report: Report, plain: bool = False) -> Text:
-    """One dense line per file, for scanning a directory.
-
-    One file, one line — always. A wrapped summary is unreadable and breaks
-    anything piping this into awk or grep, which is why every field is measured
-    and every value is stripped of the newlines and escapes that would otherwise
-    forge extra rows.
-
-    ``plain`` drops the fixed-width cosmetics for a pipe and prints the full
-    path, tab-separated: alignment is for eyes, and a truncated basename cannot
-    be fed back into any command.
-    """
-    t = report.translator
-    glyphs = "".join(
+def _glyphs(report: Report) -> str:
+    return "".join(
         LEVEL_GLYPH[report.verdicts[axis].level] for axis in AXES if axis in report.verdicts
     )
-    device = (
-        report.device.label
-        if (report.device.make or report.device.model)
-        else t.get("ui.value.unknown_device")
-    )
+
+
+def _device(report: Report) -> str:
+    device = report.device
+    if device.make or device.model:
+        return device.label
+    return report.translator.get("ui.value.unknown_device")
+
+
+def _taken(report: Report) -> tuple[str, str]:
+    """The capture time and the style that says where it came from."""
+    t = report.translator
+    taken = (report.capture.taken or "")[:16]
+    if taken:
+        return taken, "grey62"
     # A recovered date rather than "no timestamp": the name of a file a
     # messenger handed back often carries the moment its tags no longer do, and
     # a directory listing that says "no timestamp" for two hundred such files is
     # answering a question findpic can already answer.
-    taken, taken_style = (report.capture.taken or "")[:16], "grey62"
-    if not taken:
-        found = timestamp_from_filename(report.file.name)
-        if found is not None:
-            exact = found.precision == PRECISION_SECOND
-            # Parenthesised, not marked with "~": that glyph already means
-            # "fair" in the verdict column three fields to the left, and the
-            # legend at the foot of the listing defines it that way.
-            stamp = found.moment.strftime("%Y-%m-%d %H:%M" if exact else "%Y-%m-%d")
-            taken, taken_style = f"({stamp})", "grey42"
-        else:
-            taken = t.get("ui.value.no_timestamp")
-    place = (
-        report.location.place or report.location.decimal or ""
-        if report.location.present
-        else t.get("ui.value.no_location")
+    found = timestamp_from_filename(report.file.name)
+    if found is None:
+        return t.get("ui.value.no_timestamp"), "grey62"
+    # Parenthesised, not marked with "~": that glyph already means "fair" in the
+    # verdict column three fields to the left, and the legend at the foot of the
+    # listing defines it that way.
+    exact = found.precision == PRECISION_SECOND
+    stamp = found.moment.strftime("%Y-%m-%d %H:%M" if exact else "%Y-%m-%d")
+    return f"({stamp})", "grey42"
+
+
+def _place(report: Report) -> str:
+    if report.location.present:
+        return report.location.place or report.location.decimal or ""
+    return report.translator.get("ui.value.no_location")
+
+
+def summary_row(report: Report) -> str:
+    """One tab-separated row, for a pipe rather than a person.
+
+    A plain ``str`` and never a ``rich.Text``: Text's constructor strips the
+    control codes rich cannot render, carriage return among them, so a file
+    named ``car\rriage.jpg`` came out as ``carriage.jpg`` — a path that names
+    no file, in the one field whose whole purpose is to be usable.
+
+    The path is therefore emitted exactly as it is on disk, not through
+    :func:`printable`, because this mode exists to be piped into
+    ``cut -f2 | xargs``. Every other column is a value out of the photograph and
+    is still sanitised. It is the same bargain ``ls`` and ``find`` make when
+    their output is not a terminal, and it is why the aligned mode — the one a
+    person ever sees — sanitises all five.
+    """
+    # Two characters, and only two, are escaped in the path: a newline ends the
+    # record and a NUL ends the field for anything reading C strings, so leaving
+    # them raw would break the "one file, one line" promise this mode exists to
+    # keep. Escaped rather than dropped, so the row still says the name was not
+    # what it appears. Everything else — control codes, bidi, invalid UTF-8 —
+    # goes out untouched, because a path with characters removed names no file.
+    path = report.file.path.replace("\\", "\\\\").replace("\n", "\\n").replace("\0", "\\0")
+    return "\t".join(
+        (
+            printable(_glyphs(report)),
+            path,
+            printable(_device(report)),
+            printable(_taken(report)[0]),
+            printable(_place(report)),
+        )
     )
 
-    if plain:
-        fields = (glyphs, report.file.path, device, taken, place)
-        return Text("\t".join(printable(field) for field in fields))
 
+def summary_line(report: Report, width: int = 80) -> Text:
+    """One dense line per file, for scanning a directory.
+
+    One file, one line — always. A wrapped summary is unreadable and breaks
+    anything piping this into awk or grep, so every field is measured in display
+    cells and every value is stripped of the newlines and escapes that would
+    otherwise forge extra rows. See :func:`summary_row` for the piped form.
+    """
+    taken, taken_style = _taken(report)
     line = Text()
     for axis in AXES:
         verdict = report.verdicts.get(axis)
@@ -278,9 +316,14 @@ def summary_line(report: Report, plain: bool = False) -> Text:
             line.append(LEVEL_GLYPH[verdict.level], style=LEVEL_STYLE[verdict.level])
     line.append("  ")
     line.append(_col(report.file.name, 26) + " ", style="bold white")
-    line.append(_col(device, 20) + " ", style="cyan")
+    line.append(_col(_device(report), 20) + " ", style="cyan")
     line.append(_col(taken, 18) + " ", style=taken_style)
-    line.append(printable(place), style="yellow" if report.location.present else "grey42")
+    # Measured like every other column rather than left to the console's crop:
+    # cropping shortened "48.858400, 2.294500" to "48.858400, 2.2", a
+    # well-formed coordinate fifty kilometres from the truth, with nothing to
+    # say it had been cut.
+    room = max(12, width - 5 - 26 - 20 - 18 - 3)
+    line.append(_col(_place(report), room), style="yellow" if report.location.present else "grey42")
     return line
 
 
@@ -377,6 +420,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.paths:
         parser.print_help()
+        return EXIT_ERROR
+
+    if args.width is not None and args.width < MIN_WIDTH:
+        # Silently produced zero rows for every file and still exited 1, which
+        # is indistinguishable from a run that found something.
+        print(f"--width must be at least {MIN_WIDTH} columns.", file=sys.stderr)
         return EXIT_ERROR
 
     if sum(map(bool, (args.backup, args.restore, args.clean))) > 1:
@@ -484,12 +533,19 @@ def main(argv: list[str] | None = None) -> int:
             # Cropped for eyes, never for a pipe: truncating a tab-separated
             # row at the console width would cut the last field off whatever is
             # reading it, and the width of a pipe is not a real constraint.
-            if console.is_terminal:
-                console.print(summary_line(report), no_wrap=True, crop=True)
+            if sys.stdout.isatty():
+                console.print(summary_line(report, width=console.width), no_wrap=True, crop=True)
             else:
-                # Not through rich: it expands tabs to spaces, and the tab is
-                # the separator the whole plain mode exists to provide.
-                print(summary_line(report, plain=True).plain)
+                # isatty(), not console.is_terminal: rich reports a terminal
+                # whenever FORCE_COLOR or TTY_COMPATIBLE is set, which is the
+                # normal state on CI runners — so `--summary | awk -F'\t'` got
+                # coloured fixed-width basenames and not one tab.
+                #
+                # Written as bytes, not printed: the path may hold bytes that
+                # are not valid UTF-8, and it goes out exactly as it is on disk
+                # so that `cut -f2 | xargs` names the real file.
+                sys.stdout.buffer.write(os.fsencode(summary_row(report)) + b"\n")
+                sys.stdout.buffer.flush()
         if reports:
             # Three glyph columns are unreadable without a key. The key belongs
             # on stderr, though: on stdout it would land in whatever is grepping
@@ -497,7 +553,8 @@ def main(argv: list[str] | None = None) -> int:
             errors.print(
                 Text(f"^^^  {translator.get('cli.legend')}", style="grey42"),
                 no_wrap=True,
-                crop=True,
+                crop=False,
+                overflow="ignore",
             )
 
     if failures:
