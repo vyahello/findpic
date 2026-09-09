@@ -34,6 +34,34 @@ def measured(value: float | None) -> str | None:
     return f"{value:.1f}"
 
 
+#: Every C0 control plus DEL. ESC is the one that matters: rich's own
+#: STRIP_CONTROL_CODES is [7, 8, 11, 12, 13], which removes the BEL that would
+#: *terminate* an OSC sequence and leaves the ESC that opens it.
+_CONTROL = dict.fromkeys(range(32), " ") | {0x7F: " "}
+
+#: Bidirectional overrides reverse everything printed after them, which is how
+#: "gpj.exe" is made to read as "exe.jpg". findpic's own rules call the pattern
+#: out as having no legitimate reason; printing it unchallenged in a report
+#: about deception would be an odd thing to do.
+_BIDI = {ord(c): None for c in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"}
+
+
+def printable(value: object) -> str:
+    """A value from a photograph, made safe to put on a terminal.
+
+    Every camera name, lens, artist, place and filename in a report comes out of
+    a file somebody else made. A control character in one of them hands that
+    person the cursor: an ESC opens a sequence that repaints the line, moves the
+    caret, or sets the window title, and a bidi override makes a name read
+    backwards.
+
+    ``Text.append`` does not do this — it is markup-inert, which is a different
+    problem — so anything reaching the screen goes through here first, whichever
+    renderer it belongs to.
+    """
+    return str(value).translate(_CONTROL).translate(_BIDI)
+
+
 def human_bytes(size: float) -> str:
     """Render a byte count the way a person would say it."""
     if size < 1024:

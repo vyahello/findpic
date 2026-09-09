@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 
+from rich.cells import cell_len, set_cell_size
 from rich.console import Console
 from rich.text import Text
 
@@ -18,8 +19,13 @@ from .geocode import Geocoder
 from .i18n import LANGUAGE_NAMES, Translator, available_languages, detect_language
 from .models import Report, Severity, VerdictLevel
 from .recover import PRECISION_SECOND, timestamp_from_filename
-from .render.terminal import LEVEL_GLYPH, LEVEL_STYLE, render_report
+from .render.terminal import AXES, LEVEL_GLYPH, LEVEL_STYLE, render_report
 from .restore import RestoreError, backup, clean, restore
+from .util import printable
+
+#: Beyond this the prose gets harder to read, not easier. A terminal wider than
+#: this keeps its width for everything else; the report just stops growing.
+MAX_WIDTH = 100
 
 IMAGE_SUFFIXES = {
     ".jpg",
@@ -87,7 +93,26 @@ def build_parser() -> argparse.ArgumentParser:
     output.add_argument("--summary", "-s", action="store_true", help="one line per file")
     output.add_argument("--quiet", "-q", action="store_true", help="hide informational findings")
     output.add_argument("--notes", action="store_true", help="show exiftool's own warnings")
-    output.add_argument("--no-color", action="store_true", help="disable colour and styling")
+    output.add_argument(
+        "--no-color",
+        action="store_true",
+        # "colour", not "colour and styling": this follows the NO_COLOR
+        # convention, which is about colour. Bold survives; hyperlinks do not.
+        help="disable colour (also honours NO_COLOR)",
+    )
+    output.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        metavar="COLS",
+        help=f"report width (default: the terminal's, capped at {MAX_WIDTH})",
+    )
+    output.add_argument(
+        "--links",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="clickable terminal hyperlinks (default: auto)",
+    )
 
     metadata = parser.add_argument_group(
         "metadata",
@@ -168,32 +193,62 @@ def collect_paths(paths: list[Path], recursive: bool) -> list[Path]:
     return collected
 
 
-def summary_line(report: Report) -> Text:
+def _error_line(name: object, message: object) -> Text:
+    """One file's failure, with the path printed exactly as it is.
+
+    These were f-strings interpolated into rich markup, so a file named
+    ``[bold red]OWNED[not a tag].jpg`` reported itself as ``OWNED.jpg`` — a path
+    that does not exist, twice, on the one line where the true path is the whole
+    point — and repainted the rest of the line. A Text is never re-parsed.
+    """
+    line = Text(f"{printable(name)}: ", style="red")
+    line.append(printable(message))
+    return line
+
+
+def _col(text: str, width: int) -> str:
+    """Pad or elide to ``width`` display cells, not codepoints.
+
+    ``f"{name:<26.26}"`` counts characters. A CJK filename is two cells per
+    character, so twenty-six of them are fifty-two cells and every column after
+    it shifts right; an NFD-decomposed name is the opposite. The columns are the
+    whole point of this mode, so they are measured in what the terminal actually
+    draws.
+    """
+    text = printable(text)
+    size = cell_len(text)
+    if size <= width:
+        return text + " " * (width - size)
+    # Marked, because two names truncated to the same prefix printed identically
+    # and neither said it had been cut.
+    return set_cell_size(text, width - 1) + "…"
+
+
+def summary_line(report: Report, plain: bool = False) -> Text:
     """One dense line per file, for scanning a directory.
 
-    Columns are fixed-width so the eye can run down them. The timestamp is cut to
-    the minute — enough to place a photo, short enough to leave room for where.
+    One file, one line — always. A wrapped summary is unreadable and breaks
+    anything piping this into awk or grep, which is why every field is measured
+    and every value is stripped of the newlines and escapes that would otherwise
+    forge extra rows.
+
+    ``plain`` drops the fixed-width cosmetics for a pipe and prints the full
+    path, tab-separated: alignment is for eyes, and a truncated basename cannot
+    be fed back into any command.
     """
-    line = Text()
-    for axis in ("originality", "privacy", "structure"):
-        verdict = report.verdicts.get(axis)
-        if verdict is None:
-            continue
-        line.append(LEVEL_GLYPH[verdict.level], style=LEVEL_STYLE[verdict.level])
-    line.append("  ")
-    line.append(f"{report.file.name:<26.26} ", style="bold white")
     t = report.translator
+    glyphs = "".join(
+        LEVEL_GLYPH[report.verdicts[axis].level] for axis in AXES if axis in report.verdicts
+    )
     device = (
         report.device.label
         if (report.device.make or report.device.model)
         else t.get("ui.value.unknown_device")
     )
-    line.append(f"{device:<20.20} ", style="cyan")
     # A recovered date rather than "no timestamp": the name of a file a
     # messenger handed back often carries the moment its tags no longer do, and
     # a directory listing that says "no timestamp" for two hundred such files is
-    # answering a question findpic can already answer. Marked with a tilde and
-    # dimmer, because it came from the name.
+    # answering a question findpic can already answer.
     taken, taken_style = (report.capture.taken or "")[:16], "grey62"
     if not taken:
         found = timestamp_from_filename(report.file.name)
@@ -203,15 +258,29 @@ def summary_line(report: Report) -> Text:
             # "fair" in the verdict column three fields to the left, and the
             # legend at the foot of the listing defines it that way.
             stamp = found.moment.strftime("%Y-%m-%d %H:%M" if exact else "%Y-%m-%d")
-            taken = f"({stamp})"
-            taken_style = "grey42"
+            taken, taken_style = f"({stamp})", "grey42"
         else:
             taken = t.get("ui.value.no_timestamp")
-    line.append(f"{taken:<18} ", style=taken_style)
-    if report.location.present:
-        line.append(report.location.place or report.location.decimal or "", style="yellow")
-    else:
-        line.append(t.get("ui.value.no_location"), style="grey42")
+    place = (
+        report.location.place or report.location.decimal or ""
+        if report.location.present
+        else t.get("ui.value.no_location")
+    )
+
+    if plain:
+        fields = (glyphs, report.file.path, device, taken, place)
+        return Text("\t".join(printable(field) for field in fields))
+
+    line = Text()
+    for axis in AXES:
+        verdict = report.verdicts.get(axis)
+        if verdict is not None:
+            line.append(LEVEL_GLYPH[verdict.level], style=LEVEL_STYLE[verdict.level])
+    line.append("  ")
+    line.append(_col(report.file.name, 26) + " ", style="bold white")
+    line.append(_col(device, 20) + " ", style="cyan")
+    line.append(_col(taken, 18) + " ", style=taken_style)
+    line.append(printable(place), style="yellow" if report.location.present else "grey42")
     return line
 
 
@@ -293,7 +362,7 @@ def run_metadata_write(
                     )
                 )
         except (RestoreError, ExifToolError, OSError) as exc:
-            errors.print(f"[red]{path.name}:[/] {exc}")
+            errors.print(_error_line(path.name, exc), no_wrap=True, crop=False, overflow="ignore")
             failures += 1
     # Once, at the end. Said after every file it became the thing the reader
     # scrolls past, which is the opposite of what it is for.
@@ -315,13 +384,24 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ERROR
 
     no_color = args.no_color or bool(os.environ.get("NO_COLOR"))
+    # Capped. Without a width, a 200-column terminal gets a 200-cell box around
+    # a 24-character title and findings prose 194 characters wide — which is the
+    # part a person actually reads, and unreadable at that measure.
+    # (`force_terminal=None if no_color else None` used to sit here: both
+    # branches were None, an unfinished edit that looked deliberate.)
     console = Console(
         no_color=no_color,
-        force_terminal=None if no_color else None,
+        width=args.width or min(Console().width, MAX_WIDTH),
         highlight=False,
         soft_wrap=False,
     )
     errors = Console(stderr=True, no_color=no_color, highlight=False)
+    # --no-color implies never: the help promises it disables styling, and an
+    # OSC 8 hyperlink is styling. TERM=dumb means a terminal that cannot.
+    links = {"always": True, "never": False}.get(
+        args.links,
+        console.is_terminal and not no_color and os.environ.get("TERM") != "dumb",
+    )
 
     if not ExifTool.available(args.exiftool):
         errors.print(
@@ -368,14 +448,14 @@ def main(argv: list[str] | None = None) -> int:
                 translator=translator,
             )
         except ExifToolMissing as exc:
-            errors.print(f"[bold red]{exc}[/]")
+            errors.print(Text(printable(exc), style="bold red"))
             return EXIT_ERROR
         except ExifToolError as exc:
-            errors.print(f"[red]{path}:[/] {exc}")
+            errors.print(_error_line(path, exc), no_wrap=True, crop=False, overflow="ignore")
             failures += 1
             continue
         except OSError as exc:
-            errors.print(f"[red]{path}:[/] {exc}")
+            errors.print(_error_line(path, exc), no_wrap=True, crop=False, overflow="ignore")
             failures += 1
             continue
 
@@ -384,7 +464,13 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if index:
             console.print()
-        render_report(console, report, show_info=not args.quiet, show_notes=args.notes)
+        render_report(
+            console,
+            report,
+            show_info=not args.quiet,
+            show_notes=args.notes,
+            links=links,
+        )
 
     geocoder.save_cache()
 
@@ -395,12 +481,24 @@ def main(argv: list[str] | None = None) -> int:
         for report in reports:
             # One file, one line — always. A wrapped summary is unreadable and
             # breaks anything piping this into awk or grep.
-            console.print(summary_line(report), no_wrap=True, crop=True)
+            # Cropped for eyes, never for a pipe: truncating a tab-separated
+            # row at the console width would cut the last field off whatever is
+            # reading it, and the width of a pipe is not a real constraint.
+            if console.is_terminal:
+                console.print(summary_line(report), no_wrap=True, crop=True)
+            else:
+                # Not through rich: it expands tabs to spaces, and the tab is
+                # the separator the whole plain mode exists to provide.
+                print(summary_line(report, plain=True).plain)
         if reports:
             # Three glyph columns are unreadable without a key. The key belongs
             # on stderr, though: on stdout it would land in whatever is grepping
             # this, which is the reason --summary exists at all.
-            errors.print(Text(f"^^^  {translator.get('cli.legend')}", style="grey42"))
+            errors.print(
+                Text(f"^^^  {translator.get('cli.legend')}", style="grey42"),
+                no_wrap=True,
+                crop=True,
+            )
 
     if failures:
         return EXIT_ERROR

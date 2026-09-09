@@ -185,8 +185,10 @@ def test_summary_legend_goes_to_stderr(
     """
     main([str(camera_jpeg), str(gps_jpeg), "--summary", *OFFLINE])
     captured = capsys.readouterr()
-    assert "originality, privacy, structure" in captured.err
-    assert "originality, privacy, structure" not in captured.out
+    # Asserted on the glyph vocabulary rather than the wording: the legend has
+    # to fit eighty cells, so the prose is allowed to change.
+    assert "+ good" in captured.err
+    assert "+ good" not in captured.out
     assert captured.out.count("\n") == 2
 
 
@@ -403,3 +405,188 @@ def test_a_face_region_says_where_in_the_frame(
     output = " ".join(capsys.readouterr().out.split())
     assert "In frame" in output
     assert "of the frame" in output
+
+
+# ------------------------------------------------------- the report on screen
+
+
+def test_escape_sequences_never_reach_the_terminal(
+    tmp_path: Path, camera_jpeg: Path, magick, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An ESC in a photograph is the file's author taking the reader's cursor.
+
+    rich strips the BEL that would *terminate* an OSC and leaves the ESC that
+    opens it, and Text.append is markup-inert but not control-character-inert —
+    so the header, the findings body and the summary all leaked.
+    """
+    import subprocess
+
+    target = tmp_path / "esc\x1b[41mname.jpg"
+    magick("-size", "64x48", "xc:gray", str(target))
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-q",
+            "-Artist=A\x1b]0;HACKED\x07B",
+            "-Model=M\x1b[41mX",
+            "-LensModel=L\x1b[7mY",
+            str(target),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    main([str(target), *OFFLINE])
+    assert "\x1b" not in capsys.readouterr().out
+
+    main([str(target), "--summary", *OFFLINE])
+    assert "\x1b" not in capsys.readouterr().out
+
+
+def test_a_bracketed_filename_is_reported_verbatim(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The error lines built rich markup by f-string, so a file named
+    `[bold red]OWNED[not a tag].jpg` reported a path that does not exist."""
+    target = tmp_path / "[blink bold red]OWNED[not a tag].jpg"
+    target.write_bytes(b"")
+    assert main([str(target), *OFFLINE]) == EXIT_ERROR
+    assert "[blink bold red]OWNED[not a tag].jpg" in capsys.readouterr().err
+
+
+def test_summary_is_always_one_line_per_file(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One file, one line — always. A newline in a Model forged an extra row."""
+    import shutil
+    import subprocess
+
+    first, second = tmp_path / "one.jpg", tmp_path / "two.jpg"
+    shutil.copy(camera_jpeg, first)
+    shutil.copy(camera_jpeg, second)
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-q",
+            "-Model=Mod\nFORGED-ROW",
+            "-Artist=A\x1b[41mX",
+            str(first),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    main([str(first), str(second), "--summary", *OFFLINE])
+    out = capsys.readouterr().out
+    assert out.count("\n") == 2
+    assert "FORGED-ROW" in out  # kept, but on the same line
+
+
+def test_summary_columns_align_with_a_cjk_filename(
+    tmp_path: Path, camera_jpeg: Path, magick, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`f"{name:<26.26}"` counts codepoints; a CJK name is two cells each."""
+    from rich.cells import cell_len
+
+    ascii_name = tmp_path / "plain-ascii-name.jpg"
+    cjk_name = tmp_path / "日本語のファイル.jpg"
+    magick("-size", "64x48", "xc:gray", str(ascii_name))
+    magick("-size", "64x48", "xc:gray", str(cjk_name))
+
+    main([str(ascii_name), str(cjk_name), "--summary", *OFFLINE])
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert len(lines) == 2
+    starts = {cell_len(line[: line.index("Unknown device")]) for line in lines}
+    assert len(starts) == 1, f"device column starts at different cells: {starts}"
+
+
+def test_summary_prints_the_path_when_piped(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A truncated basename cannot be fed back into any command, and under -r
+    two IMG_0001.JPG in different directories are indistinguishable."""
+    import shutil
+
+    nested = tmp_path / "a" / "b"
+    nested.mkdir(parents=True)
+    target = nested / "deep.jpg"
+    shutil.copy(camera_jpeg, target)
+    main([str(target), "--summary", *OFFLINE])
+    out = capsys.readouterr().out
+    assert str(target) in out
+    assert "\t" in out
+
+
+def test_a_command_is_never_split_across_lines(
+    tmp_path: Path, gps_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both halves of a wrapped command look like plausible shell, so pasting
+    the pair runs one without its argument and then executes the filename."""
+    import shutil
+
+    target = tmp_path / "photo.jpg"
+    shutil.copy(gps_jpeg, target)
+    main([str(target), "--width", "60", *OFFLINE])
+    for line in capsys.readouterr().out.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("exiftool "):
+            continue
+        assert stripped.endswith(str(target)), f"command split: {stripped!r}"
+
+
+def test_the_report_is_capped_at_a_readable_width(
+    camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A 200-column terminal gave a 200-cell box around a 24-character title."""
+    from findpic.cli import MAX_WIDTH
+
+    main([str(camera_jpeg), "--width", "200", *OFFLINE])
+    wide = capsys.readouterr().out
+    assert max(len(line) for line in wide.splitlines()) > MAX_WIDTH
+
+    main([str(camera_jpeg), *OFFLINE])
+    default = capsys.readouterr().out
+    # The header box is the width; command lines are deliberately unwrapped and
+    # are allowed past it, because a wrapped command is two broken commands.
+    box = next(line for line in default.splitlines() if line.startswith("╭"))
+    assert len(box) <= MAX_WIDTH
+
+
+def test_a_long_value_is_capped_but_a_hash_is_not(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One value, one policy: a 307-character Artist rendered as seven folded
+    lines in DEVICE and a 60-character ellipsis in the finding below it."""
+    import shutil
+    import subprocess
+
+    target = tmp_path / "long.jpg"
+    shutil.copy(camera_jpeg, target)
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", f"-Artist={'A' * 307}", str(target)],
+        check=True,
+        capture_output=True,
+    )
+    main([str(target), *OFFLINE])
+    out = capsys.readouterr().out
+    assert "A" * 200 not in out.replace("\n", "").replace(" ", "")
+    # The hash is the one row where the whole string is the point.
+    from findpic.analysis import AnalysisOptions, analyze
+
+    report = analyze(target, options=AnalysisOptions(geocode=False))
+    assert report.file.sha256 in out.replace("\n", "").replace(" ", "")
+
+
+def test_a_bidi_filename_is_shown_as_it_really_is(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """findpic rates a right-to-left override HIGH RISK ten lines below a header
+    that was printing the lie it produces."""
+    import shutil
+
+    target = tmp_path / "holiday‮gpj.exe.jpg"
+    shutil.copy(camera_jpeg, target)
+    main([str(target), *OFFLINE])
+    out = capsys.readouterr().out
+    assert "‮" not in out
+    assert "\\u202e" in out

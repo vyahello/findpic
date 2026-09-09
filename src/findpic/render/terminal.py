@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import shlex
 
+from rich.cells import cell_len
 from rich.console import Console, Group
 from rich.padding import Padding
 from rich.panel import Panel
@@ -51,11 +52,15 @@ from ..tables import (
     SPEED_REF_KEYS,
     WHITE_BALANCE_KEYS,
 )
-from ..util import format_datetime, parse_exif_datetime
+from ..util import format_datetime, parse_exif_datetime, printable, truncate
 
 # Narrow enough that a 64-character SHA-256 still fits on one line in an
 # 80-column terminal, wide enough for the longest label we print.
 LABEL_WIDTH = 13
+
+#: The rows whose label carries a "!" prefix, so the width test knows which
+#: labels have two fewer cells to work with.
+MARKED_LABELS = frozenset({"editor", "owner", "body_serial", "lens_serial", "named_people"})
 
 LEVEL_STYLE: dict[VerdictLevel, str] = {
     VerdictLevel.GOOD: "bold green",
@@ -117,31 +122,21 @@ def _section(console: Console, title: str, table: Table) -> None:
 #: ESC is the one that matters — it starts every colour, cursor-move and
 #: clear-screen sequence — but a bare CR rewrites the line it is on and a BEL
 #: makes the machine chirp, so the whole control range goes.
-_CONTROL = dict.fromkeys(range(32), " ") | {0x7F: " "}
-#: Bidirectional overrides reverse everything printed after them, which is how
-#: "gpj.exe" is made to read as "exe.jpg". findpic's own rules call the pattern
-#: out as having no legitimate reason; printing it unchallenged in a report
-#: about deception would be an odd thing to do.
-_BIDI = {ord(c): None for c in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"}
-
-
 def safe(value: object) -> Text:
     """A metadata value, made safe to put on a terminal.
 
     Two things, both of which a photograph could do to the reader before this.
 
-    A tag value went into ``Table.add_row`` as a plain string, and rich parses
-    a plain string as *markup* — so a ``Software`` tag reading ``[/]`` raised
-    ``MarkupError`` and killed the whole run with a traceback. On a tool whose
-    job is to be pointed at files from strangers, a file that stops it working
-    is a file that wins. Returning ``Text`` is what stops the parse: rich
-    renders it literally.
+    A tag value went into ``Table.add_row`` as a plain string, and rich parses a
+    plain string as *markup* — so a ``Software`` tag reading ``[/]`` raised
+    ``MarkupError`` and killed the whole run with a traceback. Wrapping it in a
+    ``Text`` is what stops that: ``Text`` is never re-parsed.
 
-    And nothing filtered control characters, so a ``LensModel`` of
-    ``\x1b[41m\x1b[2J`` cleared the screen and repainted it. The bot has
-    escaped its output since it was written; the terminal path never did.
+    And the control characters, which ``Text`` does not touch: see
+    :func:`~findpic.util.printable`, which this shares with every other renderer
+    so there is one definition of what is safe to print.
     """
-    return Text(str(value).translate(_CONTROL).translate(_BIDI))
+    return Text(printable(value))
 
 
 def _note(note: Note | None, t: Translator) -> str | None:
@@ -203,9 +198,14 @@ def _note_row(
     _add(table, label, rendered)
 
 
-def _add(table: Table, label: str, value: object, style: str = "") -> None:
-    """Add a row, silently skipping anything empty."""
-    if value is None or value == "" or value == []:
+#: Two folded lines at the narrowest width the report is designed for. Rows
+#: whose whole point is the complete string opt out through :func:`_add_raw`.
+VALUE_LIMIT = 140
+
+
+def _add_raw(table: Table, label: str, value: object, style: str = "") -> None:
+    """A row whose value must not be shortened — a hash, or a path."""
+    if value is None or value == "":
         return
     cell = safe(value)
     if style:
@@ -213,12 +213,54 @@ def _add(table: Table, label: str, value: object, style: str = "") -> None:
     table.add_row(label, cell)
 
 
+def _add(table: Table, label: str, value: object, style: str = "", mark: bool = False) -> None:
+    """Add a row, silently skipping anything empty.
+
+    ``mark`` prefixes the label with the same ``!`` the findings list uses for a
+    warning. This module's docstring promises colour is never the *only* carrier
+    of meaning, and four rows — Editor, Owner and the two serials — were styled
+    yellow and nothing else, so under --no-color a row holding a person's full
+    name was typographically identical to "System  iOS 14.4".
+    """
+    if value is None or value == "" or value == []:
+        return
+    # Capped here, the single funnel, because every rule already truncates the
+    # same values to 40-60 characters: a 307-character Artist rendered as seven
+    # folded lines in DEVICE and a 60-character ellipsis in the finding twelve
+    # lines below — two policies for one value in one report. The whole string
+    # stays in --json.
+    cell = safe(truncate(str(value), VALUE_LIMIT) if len(str(value)) > VALUE_LIMIT else value)
+    if style:
+        cell.stylize(style)
+    table.add_row(f"! {label}" if mark else label, cell)
+
+
+def elide_middle(text: str, room: int) -> str:
+    """Shorten from the middle, so both ends survive.
+
+    A hash-named file differs from its neighbours at both ends and nowhere in
+    between, so a tail-truncated name identifies nothing.
+    """
+    if room < 8 or cell_len(text) <= room:
+        return text
+    keep = room - 1
+    head = keep * 2 // 3
+    return text[:head] + "…" + text[-(keep - head) :]
+
+
 def render_header(console: Console, report: Report) -> None:
     t = report.translator
     title = Text()
     title.append("findpic", style="bold cyan")
     title.append("  ·  ", style="grey42")
-    title.append(report.file.name, style="bold white")
+    # Elided in the middle rather than wrapped: a content-addressed name is 69
+    # characters against a 74-cell inner width, so rich broke at the space and
+    # stranded "findpic ·" on its own line with a dangling separator. The whole
+    # name is in the FILE section, where a forensic reader looks and where there
+    # is room to fold it.
+    name = printable(report.file.name)
+    room = console.width - 20
+    title.append(elide_middle(name, room), style="bold white")
     subtitle = Text(
         t.get(
             "ui.header.subtitle",
@@ -231,8 +273,34 @@ def render_header(console: Console, report: Report) -> None:
     console.print(Panel(Group(title, subtitle), border_style="grey35", padding=(0, 2)))
 
 
+#: Below this the four fixed columns leave the summary too little to be prose.
+#: At 55 cells it wrapped to one word a line; at 40 it disappeared entirely,
+#: because rich drops a column it cannot fit rather than shrinking the others.
+NARROW = 68
+
+
 def render_verdicts(console: Console, report: Report) -> None:
     t = report.translator
+    if console.width < NARROW:
+        # Printed rather than tabulated: the summary is the sentence that says
+        # what the grade means, and a table has no way to give one cell the
+        # whole width. Every column here is fixed, so rich shrank the only
+        # flexible one to a word a line and then dropped it altogether.
+        console.print()
+        for axis in AXES:
+            verdict = report.verdicts.get(axis)
+            if verdict is None:
+                continue
+            style = LEVEL_STYLE[verdict.level]
+            head = Text(f" {LEVEL_GLYPH[verdict.level]}  ", style=style)
+            head.append(t.get(f"ui.axis.{axis}"), style="grey62")
+            head.append("  ")
+            head.append(verdict.label(t), style=style)
+            console.print(Padding(head, (0, 0, 0, 1)))
+            console.print(Padding(Text(verdict.summary(t), style="white"), (0, 0, 0, 5)))
+        console.print()
+        return
+
     table = Table(box=None, show_header=False, pad_edge=False)
     table.add_column("glyph", width=3, no_wrap=True)
     table.add_column("axis", style="grey62", width=15, no_wrap=True)
@@ -281,10 +349,10 @@ def render_device(console: Console, report: Report) -> None:
         t.get("ui.label.mode"),
         " · ".join(t.get(f"mode.{key}") for key in device.capture_mode_keys),
     )
-    _add(table, t.get("ui.label.editor"), device.editor, "yellow")
-    _add(table, t.get("ui.label.owner"), device.owner, "yellow")
-    _add(table, t.get("ui.label.body_serial"), device.body_serial, "yellow")
-    _add(table, t.get("ui.label.lens_serial"), device.lens_serial, "yellow")
+    _add(table, t.get("ui.label.editor"), device.editor, "yellow", mark=True)
+    _add(table, t.get("ui.label.owner"), device.owner, "yellow", mark=True)
+    _add(table, t.get("ui.label.body_serial"), device.body_serial, "yellow", mark=True)
+    _add(table, t.get("ui.label.lens_serial"), device.lens_serial, "yellow", mark=True)
     if device.uptime_seconds:
         _add(
             table,
@@ -381,7 +449,7 @@ def render_when(console: Console, report: Report) -> None:
     _section(console, t.get("ui.section.when"), table)
 
 
-def render_where(console: Console, report: Report) -> None:
+def render_where(console: Console, report: Report, links: bool = True) -> None:
     """Where it was taken, with every number given a scale.
 
     Each row here used to be a bare measurement: "±21.8535 m", "349° N",
@@ -479,7 +547,11 @@ def render_where(console: Console, report: Report) -> None:
         # the long form for the JSON output and the bot, where width is not a
         # constraint.
         url = f"https://osm.org/?mlat={location.latitude:.6f}&mlon={location.longitude:.6f}"
-        table.add_row(t.get("ui.label.map"), Text(url, style=f"blue underline link {url}"))
+        # No underline: a terminal that supports OSC 8 underlines a link on
+        # hover itself, and the cell padding sits inside the styled span, so the
+        # rule ran seventeen cells past the last character.
+        style = f"blue link {url}" if links else "blue"
+        table.add_row(t.get("ui.label.map"), Text(url, style=style))
     _section(console, t.get("ui.section.where"), table)
 
 
@@ -523,11 +595,14 @@ def render_image(console: Console, report: Report) -> None:
             ratio=ratio or "",
         )
     _add(table, t.get("ui.label.dimensions"), dimensions)
-    _add(
-        table,
-        t.get("ui.label.orientation"),
-        _exiftool_value(image.orientation, ORIENTATION_KEYS, t),
-    )
+    # Not the *absence* of rotation: "Horizontal (normal)" is on almost every
+    # file and tells the reader nothing they did not assume.
+    if image.orientation and image.orientation != "Horizontal (normal)":
+        _add(
+            table,
+            t.get("ui.label.orientation"),
+            _exiftool_value(image.orientation, ORIENTATION_KEYS, t),
+        )
     # Directly under Orientation on purpose: that row is the display flag the
     # file carries, this one is how the device was actually being held, and a
     # reader can only notice they disagree when the two sit together.
@@ -657,7 +732,7 @@ def render_people(console: Console, report: Report) -> None:
         _add(table, "", t.get("ui.value.face_sensor_frame"), "grey54")
     named = [p.name for p in report.people if p.name]
     if named:
-        _add(table, t.get("ui.label.named_people"), ", ".join(named), "bold yellow")
+        _add(table, t.get("ui.label.named_people"), ", ".join(named), "bold yellow", mark=True)
     _section(console, t.get("ui.section.people"), table)
 
 
@@ -687,9 +762,26 @@ def _tag_groups(report: Report, show_all: bool = False) -> str:
 def render_integrity(console: Console, report: Report, show_all_groups: bool = False) -> None:
     t = report.translator
     table = _kv_table()
-    _add(table, t.get("ui.label.sha256"), report.file.sha256, "grey62")
-    _add(table, t.get("ui.label.md5"), report.file.md5, "grey62")
-    _add(table, t.get("ui.label.mime"), report.file.mime_type)
+    _add_raw(table, t.get("ui.label.path"), printable(report.file.path), "grey62")
+    # When the name had to be rewritten to be printable, say so and show what
+    # the bytes actually are. findpic's own rules rate a right-to-left override
+    # in a filename HIGH RISK; the header must not quietly print the lie it
+    # produces while a finding ten lines down calls it out.
+    if printable(report.file.name) != report.file.name:
+        _add_raw(
+            table,
+            t.get("ui.label.name_rewritten"),
+            report.file.name.encode("unicode_escape").decode("ascii"),
+            "yellow",
+        )
+    _add_raw(table, t.get("ui.label.sha256"), report.file.sha256, "grey62")
+    _add_raw(table, t.get("ui.label.md5"), report.file.md5, "grey62")
+    # The header already says "JPEG" a hundred lines up; "image/jpeg" here is
+    # the same fact in a different notation. Kept when it disagrees, which is
+    # exactly the case worth seeing.
+    mime = report.file.mime_type or ""
+    if mime and mime.rsplit("/", 1)[-1].lower() != (report.file.file_type or "").lower():
+        _add(table, t.get("ui.label.mime"), mime)
     _add(table, t.get("ui.label.tag_groups"), _tag_groups(report, show_all_groups), "grey62")
     _section(console, t.get("ui.section.file"), table)
 
@@ -723,76 +815,6 @@ def _combined_args(entries: list[Finding]) -> tuple[tuple[str, ...], list[str]]:
     return tuple(dict.fromkeys(args)), list(dict.fromkeys(costs))
 
 
-def _fix_rows(body: Text, finding: Finding, t: Translator) -> None:
-    """The command, and — where it takes more than it was asked to — the cost."""
-    if not finding.remediation:
-        return
-    body.append("\n")
-    body.append(t.get(FIX_LABEL.get(finding.remediation_kind, "ui.value.fix")), style="green bold")
-    # safe(): the command carries the file's own name, and a filename can hold
-    # ANSI escapes that repaint the terminal.
-    printed = safe(finding.remediation)
-    printed.stylize("green")
-    body.append_text(printed)
-    if finding.remediation_cost_key:
-        body.append("\n")
-        body.append(t.get("ui.value.fix_cost"), style="yellow")
-        body.append(t.get(f"ui.value.fix_cost.{finding.remediation_cost_key}"), style="grey54")
-
-
-def _finding_table(entries: list[Finding], t: Translator, report: Report | None = None) -> Table:
-    """Render findings in a glyph/body grid so wrapped text keeps its indent."""
-    table = Table(box=None, show_header=False, pad_edge=False, padding=(0, 0, 1, 0))
-    table.add_column("glyph", width=3, no_wrap=True, vertical="top")
-    table.add_column("body", overflow="fold", ratio=1)
-
-    for finding in entries:
-        body = Text()
-        body.append(finding.title(t), style="bold white")
-        if finding.confidence.value != "high":
-            body.append(
-                t.get(
-                    "ui.value.confidence",
-                    confidence=t.get(f"ui.confidence.{finding.confidence.value}"),
-                ),
-                style="grey42",
-            )
-        detail = finding.detail(t)
-        if detail:
-            body.append("\n")
-            body.append(detail, style="grey62")
-        _fix_rows(body, finding, t)
-        table.add_row(
-            Text(
-                f" {SEVERITY_GLYPH[finding.severity]}",
-                style=SEVERITY_STYLE[finding.severity],
-            ),
-            body,
-        )
-
-    # One line that does the whole category, and the pointer to --backup beneath
-    # it. This is the line most readers will paste, and it is the last moment
-    # before the metadata is gone — which is exactly where the epilog's advice to
-    # make a copy first was not being said.
-    args, costs = _combined_args(entries)
-    if report is not None and len(args) > 1:
-        combined = Text()
-        combined.append(t.get("ui.value.fix_all"), style="green bold")
-        printed = safe(fixcmd.command(report.file.path, report.file.file_type_extension, args))
-        printed.stylize("green")
-        combined.append_text(printed)
-        for cost in costs:
-            combined.append("\n")
-            combined.append(t.get("ui.value.fix_cost"), style="yellow")
-            combined.append(t.get(f"ui.value.fix_cost.{cost}"), style="grey54")
-        combined.append("\n")
-        hint = safe(t.get("ui.hint.backup_first", file=shlex.quote(report.file.path)))
-        hint.stylize("grey42")
-        combined.append_text(hint)
-        table.add_row(Text(""), combined)
-    return table
-
-
 #: The two findings that explain an empty report: that the file came through a
 #: messenger, and that it is a screen capture rather than a photograph. They are
 #: INFO by findpic's own classification, so --quiet removed them — and on a
@@ -820,14 +842,99 @@ def render_provenance(console: Console, report: Report) -> tuple[str, ...]:
         if finding is None:
             continue
         body = Text()
-        body.append(finding.title(t), style="bold white")
+        body.append(printable(finding.title(t)), style="bold white")
         detail = finding.detail(t)
         if detail:
             body.append("\n")
-            body.append(detail, style="grey62")
+            body.append(printable(detail), style="grey62")
         console.print(Padding(body, (1, 0, 0, 1)))
         return (finding.id,)
     return ()
+
+
+def _command_line(console: Console, label: str, command: str, style: str = "green") -> None:
+    """A shell command, printed as one line whatever the width.
+
+    The commands used to be appended into the same folding block as the prose,
+    so at eighty columns the filename landed alone on the second line. Both
+    halves look like plausible shell, so pasting the pair ran the command
+    without its argument and then tried to execute the filename — not an obvious
+    mis-paste, on the one line in the report the reader is told to run.
+
+    Printed unwrapped instead, and left to the terminal to soft-wrap: a soft
+    wrap is not a newline, so a copy takes the whole command as one string.
+    """
+    # The indent is in the string, not a Padding: console.print applies no_wrap
+    # and crop to the renderable it is given, and a Padding wrapper swallows
+    # both — which put the crop back and cut the command at the width.
+    line = Text("    ")
+    line.append(label, style=f"{style} bold")
+    line.append(printable(command), style=style)
+    console.print(line, no_wrap=True, crop=False, overflow="ignore")
+
+
+def _cost_line(console: Console, cost: str, t: Translator) -> None:
+    body = Text("   ")
+    body.append(t.get("ui.value.fix_cost"), style="yellow")
+    body.append(t.get(f"ui.value.fix_cost.{cost}"), style="grey54")
+    console.print(Padding(body, (0, 0, 0, 1)))
+
+
+def _print_finding(console: Console, finding: Finding, t: Translator) -> None:
+    """One finding: glyph and prose in a hanging indent, command below it."""
+    table = Table(box=None, show_header=False, pad_edge=False, padding=(0, 0, 0, 0))
+    table.add_column("glyph", width=3, no_wrap=True, vertical="top")
+    table.add_column("body", overflow="fold", ratio=1)
+
+    body = Text()
+    body.append(printable(finding.title(t)), style="bold white")
+    if finding.confidence.value != "high":
+        body.append(
+            t.get(
+                "ui.value.confidence", confidence=t.get(f"ui.confidence.{finding.confidence.value}")
+            ),
+            style="grey42",
+        )
+    detail = finding.detail(t)
+    if detail:
+        body.append("\n")
+        body.append(printable(detail), style="grey62")
+    table.add_row(
+        Text(f" {SEVERITY_GLYPH[finding.severity]}", style=SEVERITY_STYLE[finding.severity]),
+        body,
+    )
+    console.print(Padding(table, (0, 0, 0, 1)))
+
+    if finding.remediation:
+        _command_line(
+            console,
+            t.get(FIX_LABEL.get(finding.remediation_kind, "ui.value.fix")),
+            finding.remediation,
+        )
+        if finding.remediation_cost_key:
+            _cost_line(console, finding.remediation_cost_key, t)
+    console.print()
+
+
+def _print_combined_fix(console: Console, entries: list[Finding], report: Report) -> None:
+    """One command for the whole category, and the pointer to --backup."""
+    t = report.translator
+    args, costs = _combined_args(entries)
+    if len(args) < 2:
+        return
+    _command_line(
+        console,
+        t.get("ui.value.fix_all"),
+        fixcmd.command(report.file.path, report.file.file_type_extension, args),
+    )
+    for cost in costs:
+        _cost_line(console, cost, t)
+    hint = Text("   ")
+    hint.append(
+        printable(t.get("ui.hint.backup_first", file=shlex.quote(report.file.path))),
+        style="grey42",
+    )
+    console.print(Padding(hint, (0, 0, 1, 1)))
 
 
 def render_findings(
@@ -857,6 +964,12 @@ def render_findings(
         return
 
     console.print(Text(f" {t.get('ui.section.findings').upper()}", style="bold grey42"))
+    # Two glyph scales overlap in this report — "!" is POOR in the verdicts and
+    # WARNING here, "x" is BAD there and CRITICAL here — and the only key was
+    # for --summary, on stderr. The verdict glyphs need none: the word ORIGINAL
+    # is beside them. These do, and the i/- distinction decides what --quiet
+    # keeps.
+    console.print(Padding(Text(t.get("ui.findings.key"), style="grey42"), (0, 0, 0, 1)))
     by_category: dict[Category, list[Finding]] = {}
     for finding in findings:
         by_category.setdefault(finding.category, []).append(finding)
@@ -868,27 +981,22 @@ def render_findings(
         console.print(
             Padding(Text(t.get(f"ui.category.{category.value}"), style="grey54"), (0, 0, 0, 1))
         )
-        # Rich drops the last row's bottom padding, so separate the category
-        # blocks explicitly rather than letting them run together.
-        console.print(
-            Padding(
-                _finding_table(entries, t, report if category is Category.PRIVACY else None),
-                (0, 0, 1, 1),
-            )
-        )
+        for finding in entries:
+            _print_finding(console, finding, t)
+        if category is Category.PRIVACY:
+            _print_combined_fix(console, entries, report)
 
 
 def render_notes(console: Console, report: Report) -> None:
     if not (report.exiftool_warnings or report.errors):
         return
-    from ..util import truncate
 
     t = report.translator
     table = _kv_table()
     for warning in report.exiftool_warnings:
-        _add(table, t.get("ui.label.warning"), truncate(warning, 160), "grey54")
+        _add(table, t.get("ui.label.warning"), truncate(printable(warning), 160), "grey54")
     for error in report.errors:
-        _add(table, t.get("ui.label.error"), truncate(error, 160), "red")
+        _add(table, t.get("ui.label.error"), truncate(printable(error), 160), "red")
     _section(console, t.get("ui.section.notes"), table)
 
 
@@ -908,6 +1016,7 @@ def render_report(
     report: Report,
     show_info: bool = True,
     show_notes: bool = False,
+    links: bool = True,
 ) -> None:
     """Print one complete report."""
     render_header(console, report)
@@ -923,7 +1032,7 @@ def render_report(
     render_verdicts(console, report)
     render_device(console, report)
     render_when(console, report)
-    render_where(console, report)
+    render_where(console, report, links=links)
     render_image(console, report)
     render_people(console, report)
     render_findings(console, report, show_info=show_info, skip=hoisted)

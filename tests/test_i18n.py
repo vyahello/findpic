@@ -370,3 +370,25 @@ def test_no_ukrainian_row_repeats_its_own_label() -> None:
         for key, value in catalog.items():
             if key.startswith(prefix) and isinstance(value, str):
                 assert not value.startswith(label), f"{key} repeats «{label}»"
+
+
+def test_no_label_is_wider_than_its_column() -> None:
+    """The label column is a fixed 13 cells and rich crops it with an ellipsis.
+
+    A translation is free to be longer than its English source, and four rows
+    carry a "! " prefix that eats two more cells — so "Named people" became
+    "! Named peop…" the moment the prefix was added, and nothing would have said
+    so.
+    """
+    from rich.cells import cell_len
+
+    from findpic.render.terminal import LABEL_WIDTH, MARKED_LABELS
+
+    for language in available_languages():
+        catalog = load_catalog(language)
+        for key, value in catalog.items():
+            if not key.startswith("ui.label.") or not isinstance(value, str):
+                continue
+            prefix = "! " if key.split(".")[-1] in MARKED_LABELS else ""
+            width = cell_len(prefix + value)
+            assert width <= LABEL_WIDTH, f"{language} {key}: {prefix + value!r} is {width} cells"
