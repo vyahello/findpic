@@ -299,12 +299,12 @@ def test_clean_keeps_orientation_and_icc(tmp_path: Path, camera_jpeg: Path) -> N
     assert kept.stdout.strip() == "6"
 
 
-def test_clean_refuses_to_report_success_when_the_camera_survives(tmp_path: Path) -> None:
+def test_clean_refuses_to_report_success_when_the_camera_survives(tmp_path: Path, magick) -> None:
     """exiftool cannot delete IFD0 from a TIFF, and findpic accepts .tif and the
     whole TIFF-based raw family. It prints "[minor] Can't delete IFD0", exits 0,
     and leaves Make and Model exactly where they were."""
     source = tmp_path / "raw.tif"
-    subprocess.run(["magick", "-size", "64x48", "xc:steelblue", str(source)], check=True)
+    magick("-size", "64x48", "xc:steelblue", str(source))
     subprocess.run(
         ["exiftool", "-overwrite_original", "-q", "-Make=TestCorp", "-Model=TestCam", str(source)],
         check=True,
