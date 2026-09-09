@@ -77,6 +77,13 @@ EXIT_ERROR = 2
 EXIT_INTERRUPTED = 130
 
 
+def _exiftool_version() -> str:
+    try:
+        return ExifTool().version() or "not found"
+    except Exception:  # noqa: BLE001 - --version must never fail
+        return "not found"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="findpic",
@@ -98,11 +105,24 @@ def build_parser() -> argparse.ArgumentParser:
             "  findpic photo.jpg --backup               write photo.jpg.mie beside it\n"
             "  findpic stripped.jpg --restore photo.jpg.mie\n"
             "  findpic stripped.jpg --restore original.jpg    (any donor that still has it)\n"
+            "\n"
+            # The scripting contract, which lived only in the README.
+            "Exit status:\n"
+            "  0    nothing notable\n"
+            "  1    notable findings — a poor or bad verdict, or a critical finding\n"
+            "  2    an error: a file could not be read, or the arguments were wrong\n"
+            "  130  interrupted\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("paths", nargs="*", type=Path, help="image files or directories")
-    parser.add_argument("--version", action="version", version=f"findpic {__version__}")
+    # The exiftool build too: every tag findpic can read comes from its database,
+    # so "findpic 0.1.0" alone does not identify what produced a report.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"findpic {__version__} · exiftool {_exiftool_version()}",
+    )
 
     output = parser.add_argument_group("output")
     output.add_argument("--json", action="store_true", help="emit JSON instead of a report")
@@ -323,6 +343,19 @@ def _place(report: Report) -> str:
     return report.translator.get("ui.value.no_location")
 
 
+def _print_summary(console: Console, report: Report) -> None:
+    """One row, written now rather than when the whole run finishes."""
+    if sys.stdout.isatty():
+        console.print(summary_line(report, width=console.width), no_wrap=True, crop=True)
+        return
+    # isatty(), not console.is_terminal: rich reports a terminal whenever
+    # FORCE_COLOR or TTY_COMPATIBLE is set, which is the normal state on CI
+    # runners. Written as bytes because a path may hold bytes that are not valid
+    # UTF-8, and it goes out as it is on disk so `cut -f2 | xargs` names it.
+    sys.stdout.buffer.write(os.fsencode(summary_row(report)) + b"\n")
+    sys.stdout.buffer.flush()
+
+
 def summary_row(report: Report) -> str:
     """One tab-separated row, for a pipe rather than a person.
 
@@ -481,8 +514,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if not args.paths:
-        parser.print_help()
+        # stderr, not stdout: this is an error, and it was landing in whatever
+        # was reading the report.
+        parser.print_help(sys.stderr)
         return EXIT_ERROR
+
+    # Flags that were accepted, did nothing, and exited 0.
+    if args.raw and not (args.json or args.ndjson):
+        parser.error("--raw only affects --json and --ndjson output; the report is unchanged.")
+    if args.force and not args.restore:
+        parser.error("--force only applies to --restore.")
+    if args.timeout is not None and args.timeout < 1:
+        # It was accepted and then failed every file with
+        # "exiftool did not finish within -5s".
+        parser.error("--timeout must be at least 1 second.")
 
     if args.width is not None and args.width < MIN_WIDTH:
         # Silently produced zero rows for every file and still exited 1, which
@@ -491,7 +536,10 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ERROR
 
     if sum(map(bool, (args.backup, args.restore, args.clean))) > 1:
-        print("--backup, --restore and --clean do different things; run them one at a time.")
+        print(
+            "--backup, --restore and --clean do different things; run them one at a time.",
+            file=sys.stderr,
+        )
         return EXIT_ERROR
 
     no_color = args.no_color or bool(os.environ.get("NO_COLOR"))
@@ -640,7 +688,16 @@ def main(argv: list[str] | None = None) -> int:
             # on a live stream.
             print(json.dumps(report.to_dict(include_raw=args.raw), default=str), flush=True)
             continue
-        if args.json or args.summary:
+        if args.summary:
+            # Inside the loop, not after it. Buffered, the first byte of a
+            # 100-file run arrived at 22.5 s and a 300-file tree printed nothing
+            # for 42 s and then dumped 300 lines at once — so
+            # `findpic album -r --summary | head -5` cost the whole scan and a
+            # long run was indistinguishable from a hang. Nothing in
+            # summary_line reads any other report.
+            _print_summary(console, report)
+            continue
+        if args.json:
             continue
         if index:
             console.print()
@@ -672,36 +729,18 @@ def main(argv: list[str] | None = None) -> int:
         # "no GPS" from "never read".
         payload = [r.to_dict(include_raw=args.raw) for r in reports] + problems
         print(json.dumps(payload, indent=2, default=str))
-    elif args.summary:
-        for report in reports:
-            # One file, one line — always. A wrapped summary is unreadable and
-            # breaks anything piping this into awk or grep.
-            # Cropped for eyes, never for a pipe: truncating a tab-separated
-            # row at the console width would cut the last field off whatever is
-            # reading it, and the width of a pipe is not a real constraint.
-            if sys.stdout.isatty():
-                console.print(summary_line(report, width=console.width), no_wrap=True, crop=True)
-            else:
-                # isatty(), not console.is_terminal: rich reports a terminal
-                # whenever FORCE_COLOR or TTY_COMPATIBLE is set, which is the
-                # normal state on CI runners — so `--summary | awk -F'\t'` got
-                # coloured fixed-width basenames and not one tab.
-                #
-                # Written as bytes, not printed: the path may hold bytes that
-                # are not valid UTF-8, and it goes out exactly as it is on disk
-                # so that `cut -f2 | xargs` names the real file.
-                sys.stdout.buffer.write(os.fsencode(summary_row(report)) + b"\n")
-                sys.stdout.buffer.flush()
-        if reports:
-            # Three glyph columns are unreadable without a key. The key belongs
-            # on stderr, though: on stdout it would land in whatever is grepping
-            # this, which is the reason --summary exists at all.
-            errors.print(
-                Text(f"^^^  {translator.get('cli.legend')}", style="grey42"),
-                no_wrap=True,
-                crop=False,
-                overflow="ignore",
-            )
+    elif args.summary and reports:
+        # The rows are already out — printed as each file finished. Only the key
+        # is left, and it goes last because "^^^" points up at the listing.
+        #
+        # It belongs on stderr: on stdout it would land in whatever is grepping
+        # this, which is the reason --summary exists at all.
+        errors.print(
+            Text(f"^^^  {translator.get('cli.legend')}", style="grey42"),
+            no_wrap=True,
+            crop=False,
+            overflow="ignore",
+        )
 
     if failures:
         return EXIT_ERROR

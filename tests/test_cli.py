@@ -16,8 +16,12 @@ OFFLINE = ["--no-geocode"]
 
 
 def test_no_arguments_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
+    """On stderr: it is an error, and on stdout it landed in whatever was
+    reading the report."""
     assert main([]) == EXIT_ERROR
-    assert "usage: findpic" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "usage: findpic" in captured.err
+    assert captured.out == ""
 
 
 def test_report_renders_the_expected_sections(
@@ -1023,3 +1027,70 @@ def test_an_oversized_geocode_body_is_rejected(tmp_path: Path) -> None:
     assert place is None
     assert reason and "could not read" in reason
     assert not (tmp_path / "c.json").exists()
+
+
+def test_summary_rows_are_printed_as_each_file_finishes(tmp_path: Path, camera_jpeg: Path) -> None:
+    """Buffered, the first byte of a 100-file run arrived at 22.5 s, so
+    `findpic album -r --summary | head -5` cost the whole scan and a long run
+    was indistinguishable from a hang."""
+    import shutil
+    import subprocess
+    import sys
+
+    for index in range(12):
+        shutil.copy(camera_jpeg, tmp_path / f"{index}.jpg")
+
+    code = (
+        "import sys; from findpic.cli import main; "
+        "sys.exit(main([sys.argv[1], '--summary', '--no-geocode']))"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code, str(tmp_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        # A row must be readable before the process has exited.
+        first = proc.stdout.readline()  # type: ignore[union-attr]
+        assert first, "nothing was written before the run finished"
+        assert proc.poll() is None or first.count(b"\n") == 1
+    finally:
+        proc.stdout.read()  # type: ignore[union-attr]
+        proc.wait()
+
+
+@pytest.mark.parametrize(
+    ("flags", "needle"),
+    [
+        (["--raw"], "--raw"),
+        (["--force"], "--force"),
+        (["--timeout", "-5"], "--timeout"),
+    ],
+)
+def test_a_flag_that_does_nothing_is_an_error(
+    flags: list[str], needle: str, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """All three were accepted, did nothing, and exited 0 — except --timeout,
+    which was accepted and then failed every file with "did not finish within
+    -5s"."""
+    with pytest.raises(SystemExit) as exit_info:
+        main([str(camera_jpeg), *flags, *OFFLINE])
+    assert exit_info.value.code == 2
+    assert needle in capsys.readouterr().err
+
+
+def test_help_documents_the_exit_status(capsys: pytest.CaptureFixture[str]) -> None:
+    """Exit codes are the scripting contract and appeared only in the README."""
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    out = capsys.readouterr().out
+    assert "Exit status" in out
+    assert "130" in out
+
+
+def test_version_names_the_exiftool_build(capsys: pytest.CaptureFixture[str]) -> None:
+    """Every tag findpic can read comes from exiftool's database, so the
+    findpic version alone does not identify what produced a report."""
+    with pytest.raises(SystemExit):
+        main(["--version"])
+    assert "exiftool" in capsys.readouterr().out

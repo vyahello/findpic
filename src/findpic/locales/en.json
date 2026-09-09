@@ -428,6 +428,9 @@
   "cli.description": "Read a photo's metadata and explain what device made it, when and where, whether it is an untouched original, and what it leaks.",
   "cli.error.no_exiftool": "exiftool was not found. Install it with:",
   "cli.error.no_images": "No image files found in the given paths.",
+  "cli.epilog.exit_status": "Exit status:\n  0    nothing notable\n  1    notable findings — a poor or bad verdict, or a critical finding\n  2    an error: a file could not be read, or the arguments were wrong\n  130  interrupted",
+  "cli.error.conflicting_flags": "--backup, --restore and --clean do different things; run them one at a time.",
+  "cli.warn.raw_needs_json": "--raw only affects --json output; the report is unchanged.",
   "cli.geocode.backed_off": "The geocoding service asked findpic to stop ({reason}). Place names are off for the rest of this run; the coordinates are still in every report.",
   "cli.interrupted": "Interrupted — {done} of {total} files done.",
   "cli.error.no_images_here": {
