@@ -217,7 +217,17 @@ jobs:
           fi
           # "connected as @name" is only logged once getMe succeeds, which is the
           # real proof the token and the API endpoint are both good.
-          if ! docker compose logs --no-color --tail 200 bot | grep -q "connected as @"; then
+          #
+          # Matched in bash rather than piped into `grep -q`. Under
+          # `set -o pipefail` the pipe reported failure *because* it succeeded:
+          # grep -q exits on the first match, the writer takes SIGPIPE and
+          # returns 141, and pipefail makes that the status of the whole
+          # pipeline. The bot was running, connected and healthy, and the deploy
+          # was marked failed. Capturing the log first is not enough — piping the
+          # variable into grep breaks the same way — so there is no pipe here at
+          # all.
+          bot_log=$(docker compose logs --no-color --tail 200 bot)
+          if [[ "${bot_log}" != *"connected as @"* ]]; then
             echo "::error::the bot never reported a successful connection"
             exit 1
           fi
