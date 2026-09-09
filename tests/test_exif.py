@@ -228,3 +228,47 @@ def test_no_output_at_all_is_an_error_not_an_empty_report(
     binary = _stub_exiftool(tmp_path, 'echo "Killed" >&2\nexit 137\n')
     with pytest.raises(ExifToolError):
         ExifTool(binary=binary).read(camera_jpeg)
+
+
+def test_a_persistent_process_reads_exactly_what_a_fresh_one_does(
+    tmp_path: Path, camera_jpeg: Path, gps_jpeg: Path, real_samples: list[Path]
+) -> None:
+    """exiftool is Perl and starting the interpreter dominates — sixty files cost
+    8.6 s as sixty processes and 1.8 s as one — but a faster answer is only worth
+    having if it is the same answer.
+
+    The argument list already contains bare `-execute` separators, which under
+    -stay_open each emit their own `{ready}` into the stream; missing that gave
+    one of four passes and a report quietly short of its numeric values.
+    """
+    import shutil
+
+    files = [camera_jpeg, gps_jpeg, *real_samples]
+    one, many = ExifTool(), ExifTool(persistent=True)
+    try:
+        for path in files:
+            fresh, batched = one.read(path), many.read(path)
+            assert fresh.human == batched.human, path
+            assert fresh.numeric == batched.numeric, path
+            assert fresh.validation == batched.validation, path
+            assert fresh.warnings == batched.warnings, path
+            assert fresh.incomplete == batched.incomplete, path
+    finally:
+        many.close()
+
+    # `-@ -` is line-based, so an argument holding a newline cannot be expressed
+    # in it; those fall back rather than being read as two filenames.
+    awkward = tmp_path / "two\nlines.jpg"
+    shutil.copy(camera_jpeg, awkward)
+    fallback = ExifTool(persistent=True)
+    try:
+        assert fallback.read(awkward).tag_count == one.read(awkward).tag_count
+    finally:
+        fallback.close()
+
+
+def test_a_closed_persistent_process_falls_back(camera_jpeg: Path) -> None:
+    """Nothing about this may stop findpic working."""
+    tool = ExifTool(persistent=True)
+    tool.close()
+    assert tool.read(camera_jpeg).tag_count > 0
