@@ -323,6 +323,8 @@ class ExifTool:
         self._sequence = 0
         self._stderr_buffer: list[str] = []
         self._stderr_lock = threading.Lock()
+        self._stderr_marker = ""
+        self._stderr_done = threading.Event()
         self._errors_thread: threading.Thread | None = None
         if persistent:
             self._start_persistent()
@@ -508,13 +510,25 @@ class ExifTool:
         return True
 
     def _drain_stderr(self) -> None:
-        """Keep stderr empty, so a chatty file cannot fill the pipe and block."""
+        """Keep stderr empty, and say when one command's share of it has arrived.
+
+        Draining alone is not enough. stdout's `{ready}` can arrive before this
+        thread has appended the warning exiftool wrote for the same command, so
+        a snapshot taken on `{ready}` sometimes missed it — a race that showed up
+        as a report intermittently short of "[minor] XMP is missing xpacket
+        wrapper". `-echo4` puts a matching marker on stderr, which is the only
+        thing that orders the two streams against each other.
+        """
         process = self._process
         if process is None or process.stderr is None:
             return
         for line in iter(process.stderr.readline, b""):
+            text = line.decode("utf-8", errors="replace")
             with self._stderr_lock:
-                self._stderr_buffer.append(line.decode("utf-8", errors="replace"))
+                if text.strip() == self._stderr_marker:
+                    self._stderr_done.set()
+                    continue
+                self._stderr_buffer.append(text)
 
     def close(self) -> None:
         """Shut the persistent process down, if there is one."""
@@ -551,9 +565,12 @@ class ExifTool:
 
         self._sequence += 1
         token = self._sequence
+        marker_err = f"{{stderr{token}}}"
         with self._stderr_lock:
             self._stderr_buffer.clear()
-        payload = "\n".join([*argv, f"-execute{token}"]) + "\n"
+            self._stderr_marker = marker_err
+        self._stderr_done.clear()
+        payload = "\n".join([*argv, "-echo4", marker_err, f"-execute{token}"]) + "\n"
         deadline = time.monotonic() + self.timeout
         try:
             process.stdin.write(payload.encode("utf-8", errors="surrogateescape"))
@@ -583,6 +600,10 @@ class ExifTool:
             if _READY.fullmatch(text.strip()):
                 continue
             collected.append(text)
+        # Wait for this command's stderr marker before reading the buffer, so a
+        # warning written just after `{ready}` is not lost. Bounded: a missing
+        # marker must not hang the run, and an empty stderr is a normal outcome.
+        self._stderr_done.wait(timeout=max(0.0, deadline - time.monotonic()))
         with self._stderr_lock:
             errors = "".join(self._stderr_buffer)
         # -stay_open gives no per-command exit status; exiftool's own errors

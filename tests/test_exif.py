@@ -243,13 +243,20 @@ def test_a_persistent_process_reads_exactly_what_a_fresh_one_does(
     """
     import shutil
 
+    def stable(tags: dict) -> dict:
+        # Reading a file updates its access time, so the two reads legitimately
+        # disagree about System:FileAccessDate whenever they straddle a second.
+        # That is the filesystem's answer to a question about the filesystem,
+        # not a difference in what was read out of the photograph.
+        return {key: value for key, value in tags.items() if key != "System:FileAccessDate"}
+
     files = [camera_jpeg, gps_jpeg, *real_samples]
     one, many = ExifTool(), ExifTool(persistent=True)
     try:
         for path in files:
             fresh, batched = one.read(path), many.read(path)
-            assert fresh.human == batched.human, path
-            assert fresh.numeric == batched.numeric, path
+            assert stable(fresh.human) == stable(batched.human), path
+            assert stable(fresh.numeric) == stable(batched.numeric), path
             assert fresh.validation == batched.validation, path
             assert fresh.warnings == batched.warnings, path
             assert fresh.incomplete == batched.incomplete, path
