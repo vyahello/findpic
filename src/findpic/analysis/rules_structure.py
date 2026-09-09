@@ -139,6 +139,36 @@ def extraction_incomplete(context: Context) -> Iterable[Finding]:
     )
 
 
+#: The owner's iPhone X carries 182. Anything past this is not a camera being
+#: thorough.
+MAX_REASONABLE_TAGS = 500
+
+
+@rule("excessive_tags", Category.STRUCTURAL, order=1)
+def excessive_tags(context: Context) -> Iterable[Finding]:
+    """More metadata than any camera writes.
+
+    An 8x8 PNG carrying 50,000 tEXt chunks printed "50021 metadata tags" in the
+    header and, three lines below, "Structure CLEAN — the file structure is
+    exactly what a normal image looks like", exit 0. The count was already on
+    every path and consulted elsewhere as a floor; nothing anywhere had a
+    ceiling, so the report contradicted its own header.
+    """
+    count = context.meta.tag_count
+    if count <= MAX_REASONABLE_TAGS:
+        return
+    yield Finding(
+        id="structural.excessive_tags",
+        category=Category.STRUCTURAL,
+        severity=Severity.WARNING,
+        confidence=Confidence.HIGH,
+        count=count,
+        params={"count": count},
+        evidence={"tag_count": count},
+        weight=20,
+    )
+
+
 @rule("trailing_data", Category.STRUCTURAL, order=1)
 def trailing_data(context: Context) -> Iterable[Finding]:
     """Bytes living past the point where the image structure ends."""

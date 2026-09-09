@@ -364,6 +364,12 @@
   "finding.structural.encoded_blob.detail": "{tags} містить довгий безперервний рядок символів, схожих на base64. Деякі програми справді так зберігають дані; так само крізь поле, яке ніхто не перевіряє, протягують і сторонній вміст.",
   "finding.structural.extraction_incomplete.title": "exiftool не дочитав цей файл до кінця",
   "finding.structural.extraction_incomplete.detail": "exiftool завершився з кодом {code}, повернувши {got} з {expected} блоків результату. Цілі розділи цього звіту відсутні — читайте кожне «нічого не знайдено» нижче як «не перевірено».",
+  "finding.structural.excessive_tags.title": {
+    "one": "{count} тег метаданих — набагато більше, ніж записує камера",
+    "few": "{count} теги метаданих — набагато більше, ніж записує камера",
+    "many": "{count} тегів метаданих — набагато більше, ніж записує камера"
+},
+  "finding.structural.excessive_tags.detail": "Фотографія з телефона несе кілька сотень тегів. Файл із тисячами використовують як контейнер для чогось, і це «щось» ніде у файлі не описане.",
   "finding.structural.parse_error.title": "exiftool не зміг повністю розібрати цей файл",
   "finding.structural.parse_error.detail": "{details}",
   "finding.structural.parse_warning.title": {

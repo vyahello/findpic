@@ -351,6 +351,11 @@
   "finding.structural.encoded_blob.detail": "{tags} contains a long unbroken run of base64-like characters. Some applications legitimately stash data this way; it is also how content gets smuggled through a field nobody inspects.",
   "finding.structural.extraction_incomplete.title": "exiftool did not finish reading this file",
   "finding.structural.extraction_incomplete.detail": "exiftool exited with status {code} after returning {got} of {expected} result blocks. Whole sections of this report are missing — read every “nothing found” below as “not checked”.",
+  "finding.structural.excessive_tags.title": {
+    "one": "{count} metadata tag — far more than a camera writes",
+    "other": "{count} metadata tags — far more than a camera writes"
+},
+  "finding.structural.excessive_tags.detail": "A phone photograph carries a couple of hundred tags. A file with thousands is being used as a container for something, and the something is not described anywhere in the file.",
   "finding.structural.parse_error.title": "exiftool could not fully parse this file",
   "finding.structural.parse_error.detail": "{details}",
   "finding.structural.parse_warning.title": {

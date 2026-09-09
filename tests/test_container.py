@@ -107,3 +107,22 @@ def test_png_is_walked_to_iend(tmp_path: Path) -> None:
     appended = tmp_path / "image_plus.png"
     appended.write_bytes(target.read_bytes() + b"Z" * 128)
     assert scan(appended).trailing_bytes == 128
+
+
+def test_a_headerless_body_is_scanned_in_bounded_time(tmp_path: Path) -> None:
+    """The resync loop read one byte at a time in Python, so a JPEG magic
+    followed by filler cost 10 s of CPU — and --timeout does not bound it,
+    because that flag only covers the exiftool subprocess.
+
+    The same loop was paid on every ordinary photograph: 71 ms for one of the
+    owner's, 169 ms for another, which is minutes across a large sweep.
+    """
+    import time
+
+    from findpic.container import scan
+
+    target = tmp_path / "filler.jpg"
+    target.write_bytes(b"\xff\xd8" + b"A" * (32 * 1024 * 1024))
+    started = time.perf_counter()
+    scan(target)
+    assert time.perf_counter() - started < 1.0

@@ -666,3 +666,33 @@ def test_a_fix_names_the_file_it_is_printed_under(tmp_path: Path, gps_png: Path)
     assert argv[-1] == str(path)
     assert argv[argv.index("-o") + 1].endswith(".png")
     assert "photo.jpg" not in (finding.remediation or "")
+
+
+def test_a_file_of_thousands_of_tags_is_not_structurally_clean(tmp_path: Path, magick) -> None:
+    """An 8x8 PNG carrying thousands of tEXt chunks printed its own tag count in
+    the header and "Structure CLEAN" three lines below it."""
+    import struct
+    import zlib
+
+    target = tmp_path / "bomb.png"
+    magick("-size", "8x8", "xc:red", str(target))
+    raw = target.read_bytes()
+    end = raw.index(b"IEND") - 4
+    chunks = b""
+    for index in range(2000):
+        data = f"k{index}".encode() + b"\x00" + b"v"
+        chunks += (
+            struct.pack(">I", len(data))
+            + b"tEXt"
+            + data
+            + struct.pack(">I", zlib.crc32(b"tEXt" + data))
+        )
+    target.write_bytes(raw[:end] + chunks + raw[end:])
+
+    report = run(target)
+    assert "structural.excessive_tags" in finding_ids(report)
+    assert report.verdicts["structure"].level is not VerdictLevel.GOOD
+
+
+def test_an_ordinary_photograph_does_not_trip_the_tag_ceiling(camera_jpeg: Path) -> None:
+    assert "structural.excessive_tags" not in finding_ids(run(camera_jpeg))
