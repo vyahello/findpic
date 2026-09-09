@@ -26,6 +26,7 @@ the fix can delete.
 
 from __future__ import annotations
 
+import re
 import shlex
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -70,6 +71,35 @@ def output_name(path: str, extension: str | None, marker: str = "clean") -> str:
     return str(source.with_name(f"{source.stem}.{marker}.{suffix}"))
 
 
+#: Characters that must not appear literally in a printed command: a control
+#: code would reach the terminal, and a newline would split one command into two.
+_UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+def shell_quote(value: str, *, is_path: bool = False) -> str:
+    """Quote one argument so the command both runs and is safe to print.
+
+    ``shlex.quote`` is correct for the shell and wrong for the screen: it wraps
+    a filename holding a newline or an ESC in single quotes and passes the byte
+    through, so the printed command carries a control character straight to the
+    terminal. Sanitising the finished command instead — which is what this
+    replaced — rewrites the path *inside* the quotes, and the command then names
+    a file that does not exist, or, worse, a different file that does.
+
+    So a value that cannot be printed literally is emitted in ANSI-C quoting,
+    ``$'...'``, which bash and zsh both understand and which contains no control
+    characters at all. A leading dash is prefixed with ``./`` because exiftool
+    reads ``-rf.jpg`` as an option however the shell quotes it.
+    """
+    # Only a path: exiftool's own flags start with a dash and must keep it.
+    if is_path and value.startswith("-"):
+        value = f"./{value}"
+    if not _UNPRINTABLE.search(value):
+        return shlex.quote(value)
+    escaped = value.encode("unicode_escape").decode("ascii").replace("'", "\\'")
+    return f"$'{escaped}'"
+
+
 def command(
     path: str,
     extension: str | None,
@@ -78,5 +108,13 @@ def command(
     marker: str = "clean",
 ) -> str:
     """One ready-to-paste exiftool command that writes a new file."""
-    parts = ["exiftool", *args, "-o", output_name(path, extension, marker), path]
-    return " ".join(shlex.quote(part) for part in parts)
+    target = output_name(path, extension, marker)
+    return " ".join(
+        (
+            "exiftool",
+            *(shell_quote(arg) for arg in args),
+            "-o",
+            shell_quote(target, is_path=True),
+            shell_quote(path, is_path=True),
+        )
+    )

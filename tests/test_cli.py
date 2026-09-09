@@ -696,3 +696,86 @@ def test_the_place_column_is_never_silently_shortened(
     row = capsys.readouterr().out.rstrip("\n")
     coordinates = row.split("\t")[-1] if "\t" in row else row
     assert "48.858400" in coordinates or "…" in coordinates
+
+
+def test_a_command_runs_on_a_file_whose_name_fights_back(
+    tmp_path: Path, gps_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The printed command must both run and be safe to print.
+
+    shlex.quote is right for the shell and wrong for the screen — it wraps a
+    newline in quotes and passes the byte through — while sanitising the
+    finished command rewrites the path *inside* those quotes, so it names a file
+    that does not exist, or one that does and is the wrong one.
+    """
+    import shutil
+    import subprocess
+
+    for name in ("nl\nname.jpg", "esc\x1b[41m.jpg", "-rf.jpg", "it's here.jpg"):
+        target = tmp_path / name
+        shutil.copy(gps_jpeg, target)
+        main([str(target), "--width", "200", *OFFLINE])
+        printed = [
+            line.strip()
+            for line in capsys.readouterr().out.splitlines()
+            if line.strip().startswith("fix: exiftool")
+        ]
+        assert printed, name
+        written = target.with_name(f"{target.stem}.clean{target.suffix}")
+        for line in printed:
+            command = line[len("fix: ") :]
+            assert not any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in command), repr(command)
+            # Every fix for one file writes the same <stem>.clean.<ext>, which
+            # is why the report also prints a single combined command; clear it
+            # between runs so each is tested on its own.
+            written.unlink(missing_ok=True)
+            run = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+            assert run.returncode == 0, f"{name}: {run.stderr}"
+            assert written.exists(), f"{name}: wrote nothing"
+        for leftover in tmp_path.glob("*"):
+            leftover.unlink()
+
+
+def test_a_filename_cannot_forge_a_hyperlink_in_the_write_path(
+    tmp_path: Path, gps_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--clean/--backup/--restore interpolate a name into a string rich parses
+    as markup, so a photograph could emit an OSC 8 link of its own choosing."""
+    import shutil
+
+    target = tmp_path / "mk[link=http:evil.example]CLICK[red]x.jpg"
+    shutil.copy(gps_jpeg, target)
+    assert main([str(target), "--clean", *OFFLINE]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "evil.example" in out, "the name must be printed as it is"
+    assert "\x1b" not in out
+
+
+def test_the_c1_control_range_is_closed(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """U+009B is a single-character CSI and U+009D an OSC: on a terminal reading
+    Latin-1 they open a sequence exactly as ESC-[ and ESC-] do."""
+    import shutil
+    import subprocess
+
+    target = tmp_path / "c1.jpg"
+    shutil.copy(camera_jpeg, target)
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-Software=\u009b31mRED", str(target)],
+        check=True,
+        capture_output=True,
+    )
+    main([str(target), *OFFLINE])
+    out = capsys.readouterr().out
+    assert not any("\u0080" <= c <= "\u009f" for c in out)
+
+
+def test_the_tag_group_list_is_not_capped(
+    camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--notes exists to list every namespace; the 140-cell value cap dropped the
+    tail with no "+N more" to say so."""
+    main([str(camera_jpeg), "--notes", "--width", "200", *OFFLINE])
+    row = next(line for line in capsys.readouterr().out.splitlines() if "Tag groups" in line)
+    assert "…" not in row

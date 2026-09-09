@@ -196,6 +196,19 @@ def collect_paths(paths: list[Path], recursive: bool) -> list[Path]:
     return collected
 
 
+def _plain(message: str) -> Text:
+    """A message holding a filename, so rich cannot read it as markup.
+
+    Every one of these interpolates a name chosen by whoever made the file. As a
+    bare string rich parses it: a photograph called
+    ``mk[link=http:evil.example]CLICKx.jpg`` made findpic print an OSC 8
+    hyperlink to an address of the file's choosing — under --no-color, where the
+    help promises hyperlinks do not survive — and the name it printed was not
+    the name on disk.
+    """
+    return Text(printable(message))
+
+
 def _error_line(name: object, message: object) -> Text:
     """One file's failure, with the path printed exactly as it is.
 
@@ -370,21 +383,25 @@ def run_metadata_write(
                     path, destination=_destination(args.out, path, ".clean"), exiftool=exiftool
                 )
                 console.print(
-                    translator.get(
-                        "cli.clean.written",
-                        target=result.written.name,
-                        removed=result.removed,
-                        before=result.tags_before,
+                    _plain(
+                        translator.get(
+                            "cli.clean.written",
+                            target=result.written.name,
+                            removed=result.removed,
+                            before=result.tags_before,
+                        )
                     )
                 )
                 cleaned.append(path)
             elif args.backup:
                 written = backup(path, exiftool=exiftool)
                 console.print(
-                    translator.get(
-                        "cli.backup.written",
-                        sidecar=written.name,
-                        size=translator.bytes(written.stat().st_size),
+                    _plain(
+                        translator.get(
+                            "cli.backup.written",
+                            sidecar=written.name,
+                            size=translator.bytes(written.stat().st_size),
+                        )
                     )
                 )
             else:
@@ -397,11 +414,13 @@ def run_metadata_write(
                 )
                 key = "cli.restore.written" if result.recovered else "cli.restore.nothing"
                 console.print(
-                    translator.get(
-                        key,
-                        result.recovered,
-                        target=result.written.name,
-                        count=result.recovered,
+                    _plain(
+                        translator.get(
+                            key,
+                            result.recovered,
+                            target=result.written.name,
+                            count=result.recovered,
+                        )
                     )
                 )
         except (RestoreError, ExifToolError, OSError) as exc:
@@ -410,7 +429,7 @@ def run_metadata_write(
     # Once, at the end. Said after every file it became the thing the reader
     # scrolls past, which is the opposite of what it is for.
     if cleaned:
-        console.print(translator.get("cli.clean.keep_backup", file=cleaned[0].name))
+        console.print(_plain(translator.get("cli.clean.keep_backup", file=cleaned[0].name)))
     return EXIT_ERROR if failures else EXIT_OK
 
 

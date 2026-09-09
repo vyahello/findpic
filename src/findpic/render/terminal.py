@@ -15,9 +15,7 @@ Layout principles, since "readable" was the whole point of the tool:
 
 from __future__ import annotations
 
-import shlex
-
-from rich.cells import cell_len
+from rich.cells import cell_len, set_cell_size
 from rich.console import Console, Group
 from rich.padding import Padding
 from rich.panel import Panel
@@ -243,9 +241,13 @@ def elide_middle(text: str, room: int) -> str:
     """
     if room < 8 or cell_len(text) <= room:
         return text
+    # set_cell_size, not a slice: the test above is in cells and a slice is in
+    # codepoints, so a CJK name was "shortened" to twice the width it had just
+    # been measured against — and the panel wrapped anyway, which is the exact
+    # failure this function exists to prevent.
     keep = room - 1
     head = keep * 2 // 3
-    return text[:head] + "…" + text[-(keep - head) :]
+    return set_cell_size(text, head) + "…" + set_cell_size(text[::-1], keep - head)[::-1]
 
 
 def render_header(console: Console, report: Report) -> None:
@@ -782,7 +784,9 @@ def render_integrity(console: Console, report: Report, show_all_groups: bool = F
     mime = report.file.mime_type or ""
     if mime and mime.rsplit("/", 1)[-1].lower() != (report.file.file_type or "").lower():
         _add(table, t.get("ui.label.mime"), mime)
-    _add(table, t.get("ui.label.tag_groups"), _tag_groups(report, show_all_groups), "grey62")
+    # _add_raw: the 140-cell cap would silently drop the tail of the list, and
+    # under --notes the whole point of the row is that it is complete.
+    _add_raw(table, t.get("ui.label.tag_groups"), _tag_groups(report, show_all_groups), "grey62")
     _section(console, t.get("ui.section.file"), table)
 
 
@@ -869,15 +873,21 @@ def _command_line(console: Console, label: str, command: str, style: str = "gree
     # both — which put the crop back and cut the command at the width.
     line = Text("    ")
     line.append(label, style=f"{style} bold")
-    line.append(printable(command), style=style)
+    # Not printable(): fixcmd has already quoted every argument so that nothing
+    # unprintable survives, and rewriting the finished string would change the
+    # path *inside* the quotes — naming a file that does not exist, or one that
+    # does and is the wrong one.
+    line.append(command, style=style)
     console.print(line, no_wrap=True, crop=False, overflow="ignore")
 
 
 def _cost_line(console: Console, cost: str, t: Translator) -> None:
-    body = Text("   ")
+    body = Text()
     body.append(t.get("ui.value.fix_cost"), style="yellow")
     body.append(t.get(f"ui.value.fix_cost.{cost}"), style="grey54")
-    console.print(Padding(body, (0, 0, 0, 1)))
+    # Padding on all four sides so a wrapped continuation keeps the indent the
+    # rest of the block has, instead of dedenting to column one.
+    console.print(Padding(body, (0, 0, 0, 5)))
 
 
 def _print_finding(console: Console, finding: Finding, t: Translator) -> None:
@@ -929,12 +939,18 @@ def _print_combined_fix(console: Console, entries: list[Finding], report: Report
     )
     for cost in costs:
         _cost_line(console, cost, t)
-    hint = Text("   ")
-    hint.append(
-        printable(t.get("ui.hint.backup_first", file=shlex.quote(report.file.path))),
+    # Through _command_line like every other command: this one carries a
+    # findpic invocation, and wrapped it put "--backup" alone on a second line,
+    # so pasting the first ran a command that makes no backup and says nothing.
+    _command_line(
+        console,
+        "",
+        printable(
+            t.get("ui.hint.backup_first", file=fixcmd.shell_quote(report.file.path, is_path=True))
+        ),
         style="grey42",
     )
-    console.print(Padding(hint, (0, 0, 1, 1)))
+    console.print()
 
 
 def render_findings(
@@ -993,10 +1009,13 @@ def render_notes(console: Console, report: Report) -> None:
 
     t = report.translator
     table = _kv_table()
+    # _add_raw with an explicit 160: _add's cap would re-truncate to 140 and make
+    # the number here dead. On an unreadable file this row is the entire output,
+    # so what gets cut is the path saying which file failed.
     for warning in report.exiftool_warnings:
-        _add(table, t.get("ui.label.warning"), truncate(printable(warning), 160), "grey54")
+        _add_raw(table, t.get("ui.label.warning"), truncate(printable(warning), 160), "grey54")
     for error in report.errors:
-        _add(table, t.get("ui.label.error"), truncate(printable(error), 160), "red")
+        _add_raw(table, t.get("ui.label.error"), truncate(printable(error), 160), "red")
     _section(console, t.get("ui.section.notes"), table)
 
 

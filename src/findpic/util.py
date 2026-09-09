@@ -37,7 +37,10 @@ def measured(value: float | None) -> str | None:
 #: Every C0 control plus DEL. ESC is the one that matters: rich's own
 #: STRIP_CONTROL_CODES is [7, 8, 11, 12, 13], which removes the BEL that would
 #: *terminate* an OSC sequence and leaves the ESC that opens it.
-_CONTROL = dict.fromkeys(range(32), " ") | {0x7F: " "}
+#: C0, DEL, and C1. The C1 block matters: U+009B is a single-character CSI and
+#: U+009D an OSC, so on a terminal reading Latin-1 they open a sequence exactly
+#: as ESC-[ and ESC-] do, and only the C0 half was being closed.
+_CONTROL = dict.fromkeys(range(32), " ") | {0x7F: " "} | dict.fromkeys(range(0x80, 0xA0), " ")
 
 #: Bidirectional overrides reverse everything printed after them, which is how
 #: "gpj.exe" is made to read as "exe.jpg". findpic's own rules call the pattern
