@@ -1042,8 +1042,8 @@ def a_photo(tmp_path: Path, name: str = "p.jpg", payload: bytes = b"one") -> Pat
 def test_the_same_picture_twice_is_one_copy_and_two_entries(archive, tmp_path: Path) -> None:
     """Both sends have to stay visible, and the bytes must not be stored twice."""
     source = a_photo(tmp_path)
-    first = archive.store(source, user_id=7, when="20260829T134501Z")
-    second = archive.store(source, user_id=8, when="20260829T140000Z")
+    first = archive.store(source, user_id=7, when="20260829T134501Z", username="alice")
+    second = archive.store(source, user_id=8, when="20260829T140000Z", username="bob")
 
     assert first.state == "stored"
     assert second.state == "duplicate"
@@ -1051,7 +1051,8 @@ def test_the_same_picture_twice_is_one_copy_and_two_entries(archive, tmp_path: P
     assert first.rel_path != second.rel_path
     blobs = list((archive.root / "objects").rglob("*.jpg"))
     assert len(blobs) == 1
-    assert blobs[0].stat().st_nlink == 3  # the blob plus two browsable names
+    # The blob, plus a by-date and a by-user name for each of the two sends.
+    assert blobs[0].stat().st_nlink == 5
 
 
 def test_the_same_second_does_not_collide(archive, tmp_path: Path) -> None:
@@ -1067,8 +1068,8 @@ def test_the_same_second_does_not_collide(archive, tmp_path: Path) -> None:
 def test_evicting_one_send_keeps_the_other_persons_picture(archive, tmp_path: Path) -> None:
     """Getting the link count backwards deletes somebody else's photograph."""
     source = a_photo(tmp_path)
-    mine = archive.store(source, user_id=7, when="20260829T134501Z")
-    theirs = archive.store(source, user_id=8, when="20260829T140000Z")
+    mine = archive.store(source, user_id=7, when="20260829T134501Z", username="alice")
+    theirs = archive.store(source, user_id=8, when="20260829T140000Z", username="bob")
 
     assert archive.discard(mine.rel_path) == 0, "the bytes are still referenced"
     assert archive.resolve(theirs.rel_path) is not None
@@ -1382,3 +1383,116 @@ def test_a_file_with_no_colour_profile_says_nothing_about_one(tmp_path: Path, ma
     report = analyze(plain, options=AnalysisOptions(geocode=False))
     assert report.image.icc_profile is None
     assert "None" not in render_report(report)
+
+
+def test_the_handle_is_in_the_name_and_the_id_beside_it(archive, tmp_path: Path) -> None:
+    """`u8931871179` tells the person browsing the archive nothing.
+
+    The handle goes in because they are the one reading it; the numeric id
+    stays because a handle can be given up and taken over, so the name records
+    who sent this at the time and the id records who that actually was.
+    """
+    stored = archive.store(
+        a_photo(tmp_path), user_id=8931871179, when="20260905T151933Z", username="fumblr"
+    )
+    assert "fumblr" in stored.rel_path
+    assert "8931871179" in stored.rel_path
+    assert archive.resolve(stored.rel_path) is not None
+
+
+def test_a_handle_that_is_not_one_falls_back_to_the_id(archive, tmp_path: Path) -> None:
+    """This is a real directory: only an allowlist gets to name it."""
+    for handle in ("../../etc", "a/b", "..", "", None, "x" * 80, "ім'я", "a\x00b", "with space"):
+        stored = archive.store(
+            a_photo(tmp_path, payload=str(handle).encode("utf-8", "replace")),
+            user_id=7,
+            when="20260905T151933Z",
+            username=handle,
+        )
+        assert "u7" in Path(stored.rel_path).name, handle
+        assert archive.resolve(stored.rel_path) is not None
+
+
+def test_a_picture_is_reachable_by_date_and_by_sender(archive, tmp_path: Path) -> None:
+    """Two questions get asked of an archive — what came in today, and what has
+    this person sent — and one layout cannot answer both."""
+    stored = archive.store(a_photo(tmp_path), user_id=7, when="20260905T151933Z", username="alice")
+    by_date = archive.root / stored.rel_path
+    by_user = archive.root / "by-user" / "alice-7" / "2026-09-05" / by_date.name
+    assert by_date.is_file() and by_user.is_file()
+    assert by_date.stat().st_ino == by_user.stat().st_ino, "a second copy, not a link"
+
+
+def test_evicting_removes_both_names(archive, tmp_path: Path) -> None:
+    """Leaving one behind means the blob never reaches a link count of one, so
+    its bytes stay on disk for ever and the disk cap is fiction."""
+    stored = archive.store(a_photo(tmp_path), user_id=7, when="20260905T151933Z", username="alice")
+    assert archive.discard(stored.rel_path) > 0
+    assert not list((archive.root / "by-user").rglob("*.jpg"))
+    assert not list((archive.root / "objects").rglob("*.jpg"))
+
+
+def test_the_digest_is_found_by_shape_not_by_position(archive, tmp_path: Path) -> None:
+    """Three name layouts have shipped and a handle can contain the separator.
+
+    Counting fields got this wrong twice, each time leaking a blob permanently.
+    """
+    blob = next(iter([archive.store(a_photo(tmp_path), user_id=7, when="20260905T151933Z")]))
+    real = Path(blob.rel_path).stem.rsplit("-", 1)[-1]
+    for stem in (
+        f"20260829T153937Z-u5829771410-{real}",  # the original layout
+        f"20260829T153937Z-u5829771410-{real}-01",  # with a collision counter
+        f"151933-fumblr-8931871179-{real}",  # the current one
+        f"151933-a-b-c-d-8931871179-{real}",  # a handle full of separators
+    ):
+        found = archive._blob_for(Path(f"{stem}.jpg"))
+        assert found is not None, stem
+
+
+def test_an_old_name_is_brought_up_to_date(archive, tmp_path: Path) -> None:
+    """A directory half readable and half not is worse than either alone."""
+    import hashlib
+    import os
+    import shutil
+
+    source = a_photo(tmp_path)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    bucket = archive.root / "objects" / digest[:2] / digest[2:4]
+    bucket.mkdir(parents=True)
+    blob = bucket / f"{digest}.jpg"
+    shutil.copyfile(source, blob)
+    day = archive.root / "by-date" / "2026-09-05"
+    day.mkdir(parents=True)
+    old = day / f"20260905T151933Z-u8931871179-{digest[:8]}.jpg"
+    os.link(blob, old)
+
+    moved = archive.rename(
+        str(old.relative_to(archive.root)), user_id=8931871179, username="fumblr"
+    )
+    assert moved == f"by-date/2026-09-05/151933-fumblr-8931871179-{digest[:8]}.jpg"
+    assert not old.exists(), "the old name should be gone, not duplicated"
+    assert (archive.root / moved).is_file()
+    assert (
+        archive.root / "by-user" / "fumblr-8931871179" / "2026-09-05" / Path(moved).name
+    ).is_file()
+
+
+def test_renaming_twice_changes_nothing(archive, tmp_path: Path) -> None:
+    """This runs on every start, so a second pass must be a no-op.
+
+    Without the guard, _link finds the name taken, steps aside to a "-01"
+    counter, and the picture is renamed again on each restart for ever.
+    """
+    stored = archive.store(a_photo(tmp_path), user_id=7, when="20260905T151933Z", username="alice")
+    assert archive.rename(stored.rel_path, user_id=7, username="alice") is None
+    assert archive.resolve(stored.rel_path) is not None
+
+
+def test_a_rename_never_loses_the_picture(archive, tmp_path: Path) -> None:
+    """It relinks rather than copies, so a failure part-way leaves it where it
+    was — but the bytes must survive whatever happens to the names."""
+    stored = archive.store(a_photo(tmp_path), user_id=7, when="20260905T151933Z")
+    moved = archive.rename(stored.rel_path, user_id=7, username="alice")
+    assert moved is not None
+    assert len(list((archive.root / "objects").rglob("*.jpg"))) == 1
+    assert archive.resolve(moved) is not None

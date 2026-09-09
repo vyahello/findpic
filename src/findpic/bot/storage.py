@@ -739,6 +739,28 @@ class Storage:
         )
         await self.db.commit()
 
+    async def browsable_names(self) -> list[tuple[int, str, int, str | None]]:
+        """Every kept picture, with who sent it, for rebuilding its filename.
+
+        The handle comes from `people`, which holds the one seen most recently —
+        so a rebuild names a file after whoever that account is *now*. The
+        numeric id in the name is what keeps the record honest either way.
+        """
+        async with self.db.execute(
+            "SELECT p.id, p.rel_path, p.user_id, e.username"
+            " FROM photos p LEFT JOIN people e ON e.user_id = p.user_id"
+            " WHERE p.rel_path IS NOT NULL"
+        ) as cursor:
+            return [
+                (int(row["id"]), row["rel_path"], int(row["user_id"]), row["username"])
+                for row in await cursor.fetchall()
+            ]
+
+    async def note_renamed(self, photo_id: int, rel_path: str) -> None:
+        """Follow a picture that has been relinked under a new name."""
+        await self.db.execute("UPDATE photos SET rel_path = ? WHERE id = ?", (rel_path, photo_id))
+        await self.db.commit()
+
     def expire_snapshots(self, keep_days: int) -> int:
         """Delete pre-upgrade copies of the database past the retention window.
 

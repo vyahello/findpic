@@ -60,7 +60,13 @@ CHUNK = 1024 * 1024
 #: Directory names under the archive root.
 OBJECTS = "objects"
 BY_DATE = "by-date"
+BY_USER = "by-user"
 SCRATCH = ".tmp"
+
+#: A Telegram username: letters, digits and underscores, 5 to 32 characters.
+#: Validated rather than trusted, and the reason a handle may go into a path
+#: at all — this is constructing a name from an allowlist, not accepting one.
+_HANDLE = re.compile(r"[A-Za-z0-9_]{1,32}")
 
 #: What the first bytes of a file say it is, which is the only trustworthy
 #: source for an extension. exiftool's own detection is not available yet at the
@@ -214,6 +220,7 @@ class Archive:
         *,
         user_id: int,
         when: str,
+        username: str | None = None,
         claimed_suffix: str = "",
         held_bytes: int = 0,
         user_bytes: int = 0,
@@ -230,6 +237,7 @@ class Archive:
                 source,
                 user_id=user_id,
                 when=when,
+                username=username,
                 claimed_suffix=claimed_suffix,
                 held_bytes=held_bytes,
                 user_bytes=user_bytes,
@@ -250,6 +258,7 @@ class Archive:
         *,
         user_id: int,
         when: str,
+        username: str | None,
         claimed_suffix: str,
         held_bytes: int,
         user_bytes: int,
@@ -280,7 +289,14 @@ class Archive:
         if not duplicate:
             self._write(source, blob)
 
-        link = self._link(blob, when=when, user_id=user_id, digest=digest, suffix=suffix)
+        link = self._link(
+            blob,
+            when=when,
+            user_id=user_id,
+            username=username,
+            digest=digest,
+            suffix=suffix,
+        )
         return Stored(
             state="duplicate" if duplicate else "stored",
             sha256=digest,
@@ -330,20 +346,70 @@ class Archive:
         finally:
             temp.unlink(missing_ok=True)
 
-    def _link(self, blob: Path, *, when: str, user_id: int, digest: str, suffix: str) -> Path:
-        """The browsable name, in the day's directory.
+    def _link(
+        self,
+        blob: Path,
+        *,
+        when: str,
+        user_id: int,
+        username: str | None,
+        digest: str,
+        suffix: str,
+    ) -> Path:
+        """The browsable names — two of them, both pointing at the one blob.
 
-        The counter is not decoration. The stamp is per-second, so one person
-        sending the same picture twice inside a second collides — and an admin
-        is exempt from the throttle entirely, so for the operator's own account
-        that is an ordinary thing to do rather than a race.
+        ``by-date/2026-09-05/151933-fumblr-8931871179-e12a9d77.jpg``
+        ``by-user/fumblr-8931871179/2026-09-05/151933-e12a9d77.jpg``
+
+        The handle is in the name because the person who browses this directory
+        is the one who runs the bot, and ``u8931871179`` tells them nothing. The
+        numeric id stays beside it: a handle can be given up and taken over, so
+        it records who sent this *at the time* and the id records who that
+        actually was.
+
+        Both are hard links to one inode, so the second view costs a directory
+        entry and no bytes. Two questions get asked of an archive — "what came
+        in today" and "what has this person sent" — and one layout cannot answer
+        both.
+
+        The counter is not decoration: the stamp is per-second, so one person
+        sending the same picture twice inside a second collides, and an admin is
+        exempt from the throttle entirely.
         """
-        day = self.root / BY_DATE / f"{when[:4]}-{when[4:6]}-{when[6:8]}"
-        day.mkdir(parents=True, exist_ok=True)
-        stem = f"{when}-u{user_id}-{digest[:8]}"
+        stamp = when[9:15] or when[-6:]
+        day = f"{when[:4]}-{when[4:6]}-{when[6:8]}"
+        who = self.folder_for(user_id, username)
+
+        primary = self._place(
+            self.root / BY_DATE / day, f"{stamp}-{who}-{digest[:8]}", suffix, blob
+        )
+        # The same *filename* under by-user, not a shorter one. The handle is
+        # then redundant with the directory it sits in — and that redundancy is
+        # the point: eviction can find one name from the other without parsing
+        # either, and the two can never drift apart when a collision counter
+        # lands on one and not the other.
+        #
+        # Best effort: failing here must not lose the picture, which the primary
+        # link already holds.
+        with contextlib.suppress(OSError):
+            target = self.root / BY_USER / who / day / primary.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                os.link(primary, target)
+        return primary
+
+    @staticmethod
+    def folder_for(user_id: int, username: str | None) -> str:
+        """How one account is named on disk: handle and id, or just the id."""
+        handle = (username or "").lstrip("@")
+        return f"{handle}-{user_id}" if _HANDLE.fullmatch(handle) else f"u{user_id}"
+
+    def _place(self, directory: Path, stem: str, suffix: str, blob: Path) -> Path:
+        """Link the blob under ``directory``, stepping aside on a collision."""
+        directory.mkdir(parents=True, exist_ok=True)
         for attempt in range(100):
-            suffix_n = "" if attempt == 0 else f"-{attempt:02d}"
-            link = day / f"{stem}{suffix_n}{suffix}"
+            counter = "" if attempt == 0 else f"-{attempt:02d}"
+            link = directory / f"{stem}{counter}{suffix}"
             try:
                 os.link(blob, link)
                 return link
@@ -367,6 +433,66 @@ class Archive:
                 error,
                 os.getuid(),
             )
+
+    def rename(self, rel_path: str, *, user_id: int, username: str | None) -> str | None:
+        """Give an already-stored picture the current naming scheme.
+
+        Returns the new path, or None when there was nothing to do. Used once,
+        on startup, to bring an archive written by an older build up to date —
+        the alternative is a directory where some names are readable and the
+        rest are not, which is worse than either on its own.
+
+        The bytes never move: this relinks, so it costs a directory entry and
+        cannot lose a photograph even if it fails halfway.
+        """
+        link = self.resolve(rel_path)
+        blob = self._blob_for(link) if link else None
+        if link is None or blob is None:
+            return None
+
+        digest = blob.stem[:8]
+        when = self._when_of(link)
+        if when is None:
+            return None
+
+        # Already current: stop before _link, which would otherwise find the
+        # name taken, step aside to a "-01" counter and rename the picture on
+        # every single start.
+        stamp = when[9:15] or when[-6:]
+        wanted = f"{stamp}-{self.folder_for(user_id, username)}-{digest}"
+        if link.stem == wanted:
+            return None
+
+        renamed = self._link(
+            blob,
+            when=when,
+            user_id=user_id,
+            username=username,
+            digest=digest,
+            suffix=blob.suffix,
+        )
+        if renamed == link:
+            return None
+        self._unlink_siblings(link)
+        with contextlib.suppress(OSError):
+            link.unlink()
+        return str(renamed.relative_to(self.root))
+
+    @staticmethod
+    def _when_of(link: Path) -> str | None:
+        """The stamp a browsable name was built from, in either layout.
+
+        ``20260829T153937Z-…`` from the original, or the day directory plus the
+        ``151933`` prefix from the current one.
+        """
+        stem = link.stem
+        if len(stem) >= 16 and stem[8] == "T" and stem[15] == "Z":
+            return stem[:16]
+        day = link.parent.name.replace("-", "")
+        head = stem.split("-", 1)[0]
+        if len(day) == 8 and len(head) == 6 and (day + head).isdigit():
+            return f"{day}T{head}Z"
+        return None
 
     # ---------------------------------------------------------------- read
 
@@ -403,6 +529,7 @@ class Archive:
         try:
             info = link.stat()
             blob = self._blob_for(link)
+            self._unlink_siblings(link)
             link.unlink()
             freed = 0
             if blob is not None and blob.exists() and blob.stat().st_nlink == 1:
@@ -415,31 +542,47 @@ class Archive:
             logger.warning("could not remove %s: %s", rel_path, error)
             return None
 
+    def _unlink_siblings(self, link: Path) -> None:
+        """Remove the other browsable name for the *same send*.
+
+        Not by inode: two people sending one photograph share the inode, so
+        matching on it would evict somebody else's picture along with this one.
+        The two names for a single send share a filename and differ only in
+        which tree they sit under, which is exactly what makes this a one-line
+        glob rather than a scan — and why the filename was made identical in
+        both trees in the first place.
+        """
+        for sibling in (self.root / BY_USER).glob(f"*/{link.parent.name}/{link.name}"):
+            with contextlib.suppress(OSError):
+                sibling.unlink()
+
     def _blob_for(self, link: Path) -> Path | None:
         """The content-addressed copy a browsable name points at.
 
-        The name is ``{stamp}-u{user_id}-{digest8}`` with an optional ``-NN``
-        collision counter, so the digest is the **third** field and not the last
-        one. Taking the last was wrong in exactly the case the counter exists
-        for: a second send inside the same second produced ``…-3f9a2c1b-01.jpg``,
-        whose last field is ``01``, so eviction could not find the blob and
-        leaked its bytes permanently. An admin is exempt from the throttle, so
-        for the operator's own account that is ordinary rather than a race.
+        The digest is found by *shape*, never by position. Names have had three
+        layouts — ``{stamp}-u{id}-{digest8}``, the same with a ``-NN`` collision
+        counter, and the current ``{time}-{handle}-{id}-{digest8}`` — and a
+        handle can itself contain the separator. Counting fields got this wrong
+        twice, each time leaking a blob's bytes permanently, so the rule is the
+        only one that holds across all three: the last field that is exactly
+        eight hex characters.
 
-        Only eight hex characters are in the name, so the blob is found through
-        the directory fan-out rather than reconstructed.
+        Only those eight are in the name, so the full digest is recovered
+        through the directory fan-out rather than reconstructed. That is
+        unambiguous because a blob's extension comes from its own bytes: one
+        photograph can no longer occupy several blobs under one prefix.
         """
-        fields = link.stem.split("-")
-        if len(fields) < 3:
-            return None
-        digest = fields[2]
-        if len(digest) != 8 or any(character not in "0123456789abcdef" for character in digest):
+        digest = next(
+            (
+                field
+                for field in reversed(link.stem.split("-"))
+                if len(field) == 8 and all(c in "0123456789abcdef" for c in field)
+            ),
+            None,
+        )
+        if digest is None:
             return None
         bucket = self.root / OBJECTS / digest[:2] / digest[2:4]
         if not bucket.is_dir():
             return None
-        # The browsable name carries only the first eight hex characters, so the
-        # full digest cannot be reconstructed from it — hence the scan. It is
-        # unambiguous now that a blob's extension comes from its own bytes:
-        # before, one photograph could occupy several blobs under one prefix.
         return next((path for path in bucket.iterdir() if path.name.startswith(digest)), None)

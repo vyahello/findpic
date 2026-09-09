@@ -77,6 +77,10 @@ class KeepRequest:
 
     user_id: int
     when: str
+    #: The sender's Telegram handle, which goes into the filename so the folder
+    #: is readable by the person who browses it. Validated in the archive
+    #: against a strict allowlist; the numeric id is what it falls back to.
+    username: str | None = None
     held_bytes: int = 0
     user_bytes: int = 0
     stored: Stored | None = None
@@ -267,6 +271,7 @@ class AnalysisService:
                     local,
                     user_id=keep.user_id,
                     when=keep.when,
+                    username=keep.username,
                     claimed_suffix=safe_suffix(file_name, ""),
                     held_bytes=keep.held_bytes,
                     user_bytes=keep.user_bytes,

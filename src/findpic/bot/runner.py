@@ -31,7 +31,6 @@ from .storage import Storage
 logger = logging.getLogger("findpic.bot")
 
 #: Commands offered in Telegram's menu, per language.
-#: Commands offered in Telegram's menu, per language.
 MENU_COMMANDS = ("help", "lang", "about")
 
 #: How often expired analysis handles are swept.
@@ -105,6 +104,32 @@ async def configure_profile(bot: Bot, config: Config | None = None) -> None:
                 # Telegram rate-limits name changes hard; a rejection here is
                 # usually "you already set this recently", not a real problem.
                 logger.warning("could not set %s for %s: %s", what, code, error)
+
+
+async def relink_archive(storage: Storage, archive: Archive) -> int:
+    """Bring pictures stored by an older build up to the current naming.
+
+    Names went from ``20260905T151933Z-u8931871179-e12a9d77.jpg`` to
+    ``151933-fumblr-8931871179-e12a9d77.jpg``, and gained a second view under
+    ``by-user/``. Without this the directory the operator actually browses is
+    half readable and half not, which is worse than either alone.
+
+    Relinks rather than copies, so it costs a directory entry, and a failure
+    part-way through leaves every photograph exactly where it was. Idempotent:
+    a name already in the current shape is skipped, so this can run on every
+    start without a marker to remember that it has.
+    """
+    renamed = 0
+    for photo_id, rel_path, user_id, username in await storage.browsable_names():
+        moved = await asyncio.to_thread(
+            archive.rename, rel_path, user_id=user_id, username=username
+        )
+        if moved:
+            await storage.note_renamed(photo_id, moved)
+            renamed += 1
+    if renamed:
+        logger.info("renamed %s archived pictures to the current naming scheme", renamed)
+    return renamed
 
 
 async def purge_archive(storage: Storage, config: Config) -> int:
@@ -210,6 +235,7 @@ async def run(config: Config) -> None:
         await storage.remember_setting("archive_dir", str(config.archive_dir))
         if config.archive_host_dir:
             await storage.remember_setting("archive_host_dir", config.archive_host_dir)
+        await relink_archive(storage, archive)
 
     session = build_session(config)
     bot = Bot(

@@ -349,6 +349,7 @@ async def _analyse_and_reply(
         held, _ = await _quietly(storage.archive_usage(), "read the archive size", (0, 0))
         keep = KeepRequest(
             user_id=message.from_user.id,
+            username=message.from_user.username,
             when=dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
             held_bytes=held,
             user_bytes=await _quietly(
