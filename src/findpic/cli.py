@@ -16,6 +16,7 @@ from rich.text import Text
 from . import __version__
 from .analysis import AnalysisOptions, analyze
 from .exif import ExifTool, ExifToolError, ExifToolMissing
+from .geocode import DEFAULT_TIMEOUT as GEOCODE_TIMEOUT
 from .geocode import Geocoder
 from .i18n import LANGUAGE_NAMES, Translator, available_languages, detect_language
 from .models import Report, Severity, VerdictLevel
@@ -195,6 +196,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     behaviour.add_argument(
         "--timeout", type=int, default=60, metavar="SEC", help="per-file exiftool timeout"
+    )
+    behaviour.add_argument(
+        "--geocode-timeout",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help=f"how long to wait for a place name (default: {GEOCODE_TIMEOUT}s)",
     )
     behaviour.add_argument("--exiftool", metavar="PATH", help="path to the exiftool binary")
     return parser
@@ -517,7 +525,11 @@ def main(argv: list[str] | None = None) -> int:
     language = args.lang or detect_language()
     translator = Translator(language)
     exiftool = ExifTool(binary=args.exiftool, timeout=args.timeout)
-    geocoder = Geocoder(enabled=not args.no_geocode, language=language)
+    geocoder = Geocoder(
+        enabled=not args.no_geocode,
+        language=language,
+        timeout=args.geocode_timeout or GEOCODE_TIMEOUT,
+    )
     options = AnalysisOptions(
         geocode=not args.no_geocode,
         language=language,
@@ -641,6 +653,13 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     geocoder.save_cache()
+    # Said once, at the end, rather than as a per-file "not resolved" that never
+    # explains why every later photograph is missing its place name too.
+    if geocoder.gave_up:
+        errors.print(
+            _plain(translator.get("cli.geocode.backed_off", reason=geocoder.gave_up)),
+            style="yellow",
+        )
 
     if args.ndjson:
         for problem in problems:

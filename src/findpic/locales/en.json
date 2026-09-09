@@ -423,6 +423,7 @@
   "cli.description": "Read a photo's metadata and explain what device made it, when and where, whether it is an untouched original, and what it leaks.",
   "cli.error.no_exiftool": "exiftool was not found. Install it with:",
   "cli.error.no_images": "No image files found in the given paths.",
+  "cli.geocode.backed_off": "The geocoding service asked findpic to stop ({reason}). Place names are off for the rest of this run; the coordinates are still in every report.",
   "cli.interrupted": "Interrupted — {done} of {total} files done.",
   "cli.error.no_images_here": {
     "one": "No image files directly in {path}, but {count} in its subdirectories. Add --recursive to include it.",

@@ -923,3 +923,103 @@ def test_a_jfif_is_recognised(tmp_path: Path, camera_jpeg: Path) -> None:
 
     shutil.copy(camera_jpeg, tmp_path / "chrome.jfif")
     assert collect_paths([tmp_path], recursive=False) == [tmp_path / "chrome.jfif"]
+
+
+# ------------------------------------------------------------- the geocoder
+
+
+def test_a_malformed_geocode_payload_does_not_abort_the_run(
+    tmp_path: Path,
+    gps_jpeg: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The cache is plain JSON in ~/.cache and was replayed unvalidated, so a
+    payload whose `address` is a list raised AttributeError with no network
+    involved at all — and took the whole run with it, stdout empty."""
+    import shutil
+
+    cache = tmp_path / "geocode.json"
+    cache.write_text('{"48.8584,2.2945@en": {"address": ["not", "a", "dict"]}}')
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    (tmp_path / "findpic").mkdir(exist_ok=True)
+    shutil.copy(cache, tmp_path / "findpic" / "geocode.json")
+
+    for index in range(2):
+        shutil.copy(gps_jpeg, tmp_path / f"{index}.jpg")
+    code = main([str(tmp_path / "0.jpg"), str(tmp_path / "1.jpg"), "--json"])
+    assert code in (EXIT_OK, EXIT_FINDINGS)
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 2, "one bad cache entry must not lose the other file"
+
+
+def test_a_429_stops_further_geocoding(tmp_path: Path) -> None:
+    """A local server answering 429 with Retry-After: 3600 received ten more
+    requests — a good way to have the user's address banned by the service
+    findpic depends on."""
+    import urllib.error
+
+    from findpic.geocode import Geocoder
+
+    calls = {"n": 0}
+
+    def refuse(latitude: float, longitude: float) -> dict:
+        calls["n"] += 1
+        raise urllib.error.HTTPError("u", 429, "Too Many", {"Retry-After": "3600"}, None)
+
+    geocoder = Geocoder(cache_file=tmp_path / "c.json")
+    geocoder._fetch = refuse  # type: ignore[method-assign]
+    for index in range(10):
+        geocoder.reverse(48.0 + index * 0.01, 2.0)
+    assert calls["n"] == 1
+    assert geocoder.gave_up and "3600" in geocoder.gave_up
+
+
+def test_a_dead_network_is_not_retried_forever(tmp_path: Path) -> None:
+    """Every failure branch returned without touching the cache, so a dead
+    network cost the full timeout per photograph — 49.5 s for six photos."""
+    import urllib.error
+
+    from findpic.geocode import Geocoder
+
+    calls = {"n": 0}
+
+    def dead(latitude: float, longitude: float) -> dict:
+        calls["n"] += 1
+        raise urllib.error.URLError("Connection refused")
+
+    geocoder = Geocoder(cache_file=tmp_path / "c.json")
+    geocoder._fetch = dead  # type: ignore[method-assign]
+    for index in range(10):
+        geocoder.reverse(48.0 + index * 0.01, 2.0)
+    assert calls["n"] == 3, calls
+
+
+def test_an_oversized_geocode_body_is_rejected(tmp_path: Path) -> None:
+    """A 25 MB reply was read whole, parsed, and written verbatim into the cache
+    and into place_detail, with the report looking entirely normal."""
+    import io
+    import urllib.request
+
+    from findpic.geocode import MAX_RESPONSE_BYTES, Geocoder
+
+    class Flood(io.BytesIO):
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def flood(request: object, timeout: float = 0) -> Flood:
+        return Flood(b'{"address": {"city": "' + b"x" * (MAX_RESPONSE_BYTES * 2) + b'"}}')
+
+    geocoder = Geocoder(cache_file=tmp_path / "c.json")
+    original = urllib.request.urlopen
+    urllib.request.urlopen = flood  # type: ignore[assignment]
+    try:
+        place, reason = geocoder.reverse(48.8584, 2.2945)
+    finally:
+        urllib.request.urlopen = original  # type: ignore[assignment]
+    assert place is None
+    assert reason and "could not read" in reason
+    assert not (tmp_path / "c.json").exists()
