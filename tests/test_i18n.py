@@ -315,3 +315,58 @@ def test_no_catalogue_string_names_a_sample_file() -> None:
             if isinstance(value, str) and pattern.search(value)
         }
         assert not named, f"{language}: {named}"
+
+
+@pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
+def test_the_ukrainian_image_section_has_no_english_values(
+    tmp_path: Path, gps_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """exiftool decodes these tags into English prose and ships no Ukrainian
+    pack, so a Ukrainian report printed "Орієнтація Rotate 90 CW"."""
+    import shutil
+    import subprocess
+
+    from findpic.cli import main
+
+    # A copy: gps_jpeg is session-scoped and shared with every other test.
+    target = tmp_path / "uk.jpg"
+    shutil.copy(gps_jpeg, target)
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-q",
+            "-n",
+            "-Orientation=6",
+            "-Flash=24",
+            "-ExposureProgram=2",
+            str(target),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    main([str(target), "--lang", "uk", "--no-geocode"])
+    output = " ".join(capsys.readouterr().out.split())
+    for english in ("Rotate 90 CW", "Did not fire", "Program AE", "Huffman coding"):
+        assert english not in output, english
+
+
+def test_no_ukrainian_row_repeats_its_own_label() -> None:
+    """A two-column table has already said the label in the left column.
+
+    `interpret` writes whole sentences because the bot prints them as sentences,
+    and in Ukrainian several open with the row's own word — "Висота  Висота 325
+    м над рівнем моря". Every value the terminal uses as a row has a `scale.`
+    form that drops it.
+    """
+    catalog = load_catalog("uk")
+    pairs = {
+        "ui.label.accuracy": "scale.accuracy.",
+        "ui.label.altitude": "scale.altitude",
+        "ui.label.shutter": "scale.shutter.",
+    }
+    for label_key, prefix in pairs.items():
+        label = catalog[label_key]
+        for key, value in catalog.items():
+            if key.startswith(prefix) and isinstance(value, str):
+                assert not value.startswith(label), f"{key} repeats «{label}»"

@@ -17,6 +17,7 @@ from .exif import ExifTool, ExifToolError, ExifToolMissing
 from .geocode import Geocoder
 from .i18n import LANGUAGE_NAMES, Translator, available_languages, detect_language
 from .models import Report, Severity, VerdictLevel
+from .recover import PRECISION_SECOND, timestamp_from_filename
 from .render.terminal import LEVEL_GLYPH, LEVEL_STYLE, render_report
 from .restore import RestoreError, backup, clean, restore
 
@@ -188,8 +189,25 @@ def summary_line(report: Report) -> Text:
         else t.get("ui.value.unknown_device")
     )
     line.append(f"{device:<20.20} ", style="cyan")
-    taken = (report.capture.taken or "")[:16] or t.get("ui.value.no_timestamp")
-    line.append(f"{taken:<17} ", style="grey62")
+    # A recovered date rather than "no timestamp": the name of a file a
+    # messenger handed back often carries the moment its tags no longer do, and
+    # a directory listing that says "no timestamp" for two hundred such files is
+    # answering a question findpic can already answer. Marked with a tilde and
+    # dimmer, because it came from the name.
+    taken, taken_style = (report.capture.taken or "")[:16], "grey62"
+    if not taken:
+        found = timestamp_from_filename(report.file.name)
+        if found is not None:
+            exact = found.precision == PRECISION_SECOND
+            # Parenthesised, not marked with "~": that glyph already means
+            # "fair" in the verdict column three fields to the left, and the
+            # legend at the foot of the listing defines it that way.
+            stamp = found.moment.strftime("%Y-%m-%d %H:%M" if exact else "%Y-%m-%d")
+            taken = f"({stamp})"
+            taken_style = "grey42"
+        else:
+            taken = t.get("ui.value.no_timestamp")
+    line.append(f"{taken:<18} ", style=taken_style)
     if report.location.present:
         line.append(report.location.place or report.location.decimal or "", style="yellow")
     else:

@@ -39,6 +39,18 @@ from ..interpret import (
     shutter_seconds,
 )
 from ..models import Category, Finding, Report, Severity, VerdictLevel
+from ..recover import PRECISION_SECOND, timestamp_from_filename
+from ..tables import (
+    COLOR_SPACE_KEYS,
+    ENCODING_PROCESS_KEYS,
+    EXPOSURE_PROGRAM_KEYS,
+    FLASH_KEYS,
+    METERING_KEYS,
+    ORIENTATION_KEYS,
+    SCENE_TYPE_KEYS,
+    SPEED_REF_KEYS,
+    WHITE_BALANCE_KEYS,
+)
 from ..util import format_datetime, parse_exif_datetime
 
 # Narrow enough that a 64-character SHA-256 still fits on one line in an
@@ -147,6 +159,30 @@ def _note(note: Note | None, t: Translator) -> str | None:
             params[name[: -len("_key")]] = t.get(str(value))
             params.pop(name)
     return t.get(note.key, **params)
+
+
+def _scaled(note: Note | None) -> Note | None:
+    """The bare-fragment form of an interpretation, for use as a table value.
+
+    `interpret` writes complete sentences because the bot prints them as
+    sentences. A two-column table has already said "Altitude" in the left
+    column, and in Ukrainian the sentence starts with that same word.
+    """
+    if note is None:
+        return None
+    return Note(note.key.replace("detail.", "scale.", 1), note.params)
+
+
+def _exiftool_value(value: object, mapping: dict[str, str], t: Translator) -> object:
+    """Translate one of exiftool's decoded English strings, or leave it alone.
+
+    Exact match, never a slug built from the value: an unmapped string would ask
+    for a catalogue key that does not exist, and a missing key silently falls
+    back to English while failing the catalogue-parity test. Out-of-range tags
+    decode as "Unknown (5)", and the raw string is the honest answer for those.
+    """
+    key = mapping.get(str(value)) if value is not None else None
+    return t.get(key) if key else value
 
 
 def _note_row(
@@ -265,18 +301,58 @@ def render_device(console: Console, report: Report) -> None:
     _section(console, t.get("ui.section.device"), table)
 
 
-def render_when(console: Console, report: Report) -> None:
+def _taken_row(table: Table, report: Report) -> None:
+    """The capture time, from the tags if they still have it and the name if not.
+
+    A messenger deletes the timestamp and then hands the file over under a name
+    containing it. findpic already recovers that — and printed it forty-four
+    lines lower, under Provenance, while WHEN showed the filesystem mtime. The
+    bot has always put it here. This is the terminal catching up.
+    """
     t, capture = report.translator, report.capture
-    table = _kv_table()
 
     if capture.taken:
+        shown = capture.taken
+        if capture.taken_subsec:
+            # A decimal fraction of a second, not milliseconds: "5" is half a
+            # second and "052" is fifty-two thousandths. exiftool preserves the
+            # leading zeros (it quotes such values in its JSON), so the digits
+            # go in exactly as they came, after the seconds and before the
+            # offset. It is extracted, shipped in --json, and was shown nowhere.
+            head, _, offset = shown.partition(" +")
+            head, _, minus = head.partition(" -") if not offset else (head, "", "")
+            tail = f" +{offset}" if offset else (f" -{minus}" if minus else "")
+            shown = f"{head}.{capture.taken_subsec}{tail}"
         when = t.describe_when(parse_exif_datetime(capture.taken))
         _add(
             table,
             t.get("ui.label.taken"),
-            f"{capture.taken}   ({when})" if when else capture.taken,
+            f"{shown}   ({when})" if when else shown,
             "bold white",
         )
+        return
+
+    found = timestamp_from_filename(report.file.name)
+    if found is None:
+        return
+    if found.precision == PRECISION_SECOND:
+        value = found.moment.strftime("%Y-%m-%d %H:%M:%S")
+        when = t.describe_when(found.moment)
+    else:
+        # Only the day is known. Printing 00:00:00 would invent an hour.
+        value = found.moment.strftime("%Y-%m-%d")
+        when = t.get("ui.value.day_only", weekday=t.weekday(found.moment.weekday()))
+    # Yellow, not bold white: this is reconstructed, and it must never be
+    # mistaken for something the file actually says.
+    _add(table, t.get("ui.label.taken"), f"{value}   ({when})" if when else value, "yellow")
+    _add(table, "", t.get("ui.value.taken_from_filename"), "grey54")
+
+
+def render_when(console: Console, report: Report) -> None:
+    t, capture = report.translator, report.capture
+    table = _kv_table()
+
+    _taken_row(table, report)
     if capture.taken_offset:
         _add(
             table,
@@ -292,12 +368,16 @@ def render_when(console: Console, report: Report) -> None:
             _add(table, t.get("ui.label.modified"), capture.modified, "yellow")
     _add(table, t.get("ui.label.gps_clock"), capture.gps_utc)
     # The filesystem timestamp is about the copy on this disk, not the photo, so
-    # it comes last and normalised out of exiftool's colon-separated format.
-    _add(
-        table,
-        t.get("ui.label.file_saved"),
-        format_datetime(parse_exif_datetime(report.file.modified)),
-    )
+    # it comes last — and only when something above it is about the photograph.
+    # On a stripped file it was the entire WHEN section: a heading promising
+    # when the picture was taken, under which sat the date this copy happened to
+    # be written to this disk.
+    if table.row_count:
+        _add(
+            table,
+            t.get("ui.label.file_saved"),
+            format_datetime(parse_exif_datetime(report.file.modified)),
+        )
     _section(console, t.get("ui.section.when"), table)
 
 
@@ -347,9 +427,15 @@ def render_where(console: Console, report: Report) -> None:
         _note_row(
             table,
             t.get("ui.label.altitude"),
-            describe_altitude(
-                location.altitude_m,
-                below=(location.altitude_ref or "").lower().startswith("below"),
+            # `scale.` rather than `detail.`, for the same reason as accuracy
+            # above: the `detail.*` forms are whole sentences written for the
+            # bot, and in Ukrainian they open with the word this row's label
+            # already carries — "Висота  Висота 325 м над рівнем моря".
+            _scaled(
+                describe_altitude(
+                    location.altitude_m,
+                    below=(location.altitude_ref or "").lower().startswith("below"),
+                )
             ),
             t,
         )
@@ -369,7 +455,11 @@ def render_where(console: Console, report: Report) -> None:
             t.get("ui.label.movement"),
             describe_movement(location.speed, location.speed_ref),
             t,
-            raw=f"{location.speed:g} {location.speed_ref}" if location.speed_ref else None,
+            raw=(
+                f"{location.speed:g} {_exiftool_value(location.speed_ref, SPEED_REF_KEYS, t)}"
+                if location.speed_ref
+                else None
+            ),
         )
 
     if location.present:
@@ -393,6 +483,32 @@ def render_where(console: Console, report: Report) -> None:
     _section(console, t.get("ui.section.where"), table)
 
 
+def _encoding(report: Report, t: Translator) -> object:
+    """How the pixels are stored, with the detail a forensic reader wants.
+
+    Chroma subsampling is not decoration in a tool whose originality axis is
+    built on how a file was compressed: 4:2:0 against 4:4:4 separates a camera
+    pipeline from a re-encoder.
+
+    All three of the extra fields come from exiftool's ``File:`` group, which
+    does not exist on a HEIC — where ``encoding_process`` is absent too, so the
+    row silently disappeared. The QuickTime profile is the equivalent fact.
+    """
+    image = report.image
+    process = _exiftool_value(image.encoding_process, ENCODING_PROCESS_KEYS, t)
+    if process is None:
+        return report.raw.get("QuickTime:GeneralProfileIDC")
+    if not (image.subsampling and image.bits_per_sample and image.color_components):
+        return process
+    return t.get(
+        "ui.value.encoding_detail",
+        process=process,
+        subsampling=image.subsampling,
+        bits=image.bits_per_sample,
+        components=image.color_components,
+    )
+
+
 def render_image(console: Console, report: Report) -> None:
     t, image, capture = report.translator, report.image, report.capture
     table = _kv_table()
@@ -407,7 +523,11 @@ def render_image(console: Console, report: Report) -> None:
             ratio=ratio or "",
         )
     _add(table, t.get("ui.label.dimensions"), dimensions)
-    _add(table, t.get("ui.label.orientation"), image.orientation)
+    _add(
+        table,
+        t.get("ui.label.orientation"),
+        _exiftool_value(image.orientation, ORIENTATION_KEYS, t),
+    )
     # Directly under Orientation on purpose: that row is the display flag the
     # file carries, this one is how the device was actually being held, and a
     # reader can only notice they disagree when the two sit together.
@@ -436,13 +556,16 @@ def render_image(console: Console, report: Report) -> None:
     _note_row(
         table,
         t.get("ui.label.shutter"),
-        describe_shutter(
-            shutter_seconds(
-                report.raw.get("ExifIFD:ExposureTime") or report.raw.get("Composite:ShutterSpeed")
-            ),
-            # The tag's presence only. exiftool does not decode OISMode, so
-            # what the value means is not established.
-            stabilised=report.raw.get("Apple:OISMode") is not None,
+        _scaled(
+            describe_shutter(
+                shutter_seconds(
+                    report.raw.get("ExifIFD:ExposureTime")
+                    or report.raw.get("Composite:ShutterSpeed")
+                ),
+                # The tag's presence only. exiftool does not decode OISMode, so
+                # what the value means is not established.
+                stabilised=report.raw.get("Apple:OISMode") is not None,
+            )
         ),
         t,
     )
@@ -453,10 +576,31 @@ def render_image(console: Console, report: Report) -> None:
         t,
         raw=report.raw.get("Apple:FocusDistanceRange"),
     )
-    _add(table, t.get("ui.label.flash"), capture.flash)
-    _add(table, t.get("ui.label.program"), capture.exposure_program)
-    _add(table, t.get("ui.label.colour"), image.icc_profile or image.color_space)
-    _add(table, t.get("ui.label.encoding"), image.encoding_process)
+    _add(table, t.get("ui.label.flash"), _exiftool_value(capture.flash, FLASH_KEYS, t))
+    _add(
+        table,
+        t.get("ui.label.program"),
+        _exiftool_value(capture.exposure_program, EXPOSURE_PROGRAM_KEYS, t),
+    )
+    _add(
+        table,
+        t.get("ui.label.colour"),
+        image.icc_profile or _exiftool_value(image.color_space, COLOR_SPACE_KEYS, t),
+    )
+    _add(
+        table,
+        t.get("ui.label.metering"),
+        " · ".join(
+            str(_exiftool_value(value, mapping, t))
+            for value, mapping in (
+                (capture.metering_mode, METERING_KEYS),
+                (capture.white_balance, WHITE_BALANCE_KEYS),
+                (capture.scene_capture_type, SCENE_TYPE_KEYS),
+            )
+            if value
+        ),
+    )
+    _add(table, t.get("ui.label.encoding"), _encoding(report, t))
     if image.has_thumbnail and image.thumbnail_size:
         _add(
             table,
@@ -464,6 +608,15 @@ def render_image(console: Console, report: Report) -> None:
             t.get("ui.value.thumbnail", bytes=t.bytes(image.thumbnail_size)),
         )
     _section(console, t.get("ui.section.image"), table)
+
+
+#: Not the file's own metadata: the filesystem's view of it, and exiftool's own
+#: derived values. "Other" is not a group at all — group_counts() files any key
+#: without a colon there, and the only such key is exiftool's echo of the path.
+UNCOUNTED_GROUPS = frozenset({"System", "File", "ExifTool", "Composite", "Other"})
+
+#: How many groups are named before the tail is folded into "+N more".
+GROUPS_SHOWN = 5
 
 
 def render_people(console: Console, report: Report) -> None:
@@ -477,18 +630,67 @@ def render_people(console: Console, report: Report) -> None:
         t.get("ui.value.regions", len(report.people)),
         "yellow",
     )
+    # Where in the picture. Extracted, carried in --json twice, and shown by
+    # neither renderer — a count alone says people are present, this says where
+    # the camera thought they were.
+    for person in report.people[:4]:
+        if None in (person.x, person.y, person.w, person.h):
+            # Three of the four ways a region is built carry no geometry at all
+            # (a bare name from Microsoft's People tags, or from PersonInImage).
+            continue
+        _add(
+            table,
+            t.get("ui.label.frame"),
+            t.get(
+                "ui.value.face_at",
+                # MWG stores the region's *centre*, not its top-left corner.
+                x=f"{person.x * 100:.0f}",
+                y=f"{person.y * 100:.0f}",
+                w=f"{person.w * 100:.0f}",
+                h=f"{person.h * 100:.0f}",
+            ),
+        )
+    # The coordinates are in the frame the sensor wrote, and this file may carry
+    # a rotation flag — so on a phone photo held upright, "48% down" is not 48%
+    # down the picture the reader is looking at. Said once, under the rows.
+    if report.image.orientation and any(p.x is not None for p in report.people):
+        _add(table, "", t.get("ui.value.face_sensor_frame"), "grey54")
     named = [p.name for p in report.people if p.name]
     if named:
         _add(table, t.get("ui.label.named_people"), ", ".join(named), "bold yellow")
     _section(console, t.get("ui.section.people"), table)
 
 
-def render_integrity(console: Console, report: Report) -> None:
+def _tag_groups(report: Report, show_all: bool = False) -> str:
+    """Which namespaces the tags live in, biggest first.
+
+    Computed on every run, stored on the model, emitted in --json, and rendered
+    by nobody. It is the cheapest orientation a forensic reader gets: "Apple 34"
+    says the vendor block survived, and its absence says it did not.
+
+    ``report.groups`` already arrives sorted by count then name, so this only
+    filters and folds.
+    """
+    t = report.translator
+    counted = {name: count for name, count in report.groups.items() if name not in UNCOUNTED_GROUPS}
+    if not counted:
+        # A fully stripped file can leave nothing but System/File/Composite.
+        return ""
+    names = list(counted)
+    shown = names if show_all else names[:GROUPS_SHOWN]
+    line = " · ".join(f"{name} {counted[name]}" for name in shown)
+    if len(names) > len(shown):
+        line += " · " + t.get("ui.value.more_groups", count=len(names) - len(shown))
+    return line
+
+
+def render_integrity(console: Console, report: Report, show_all_groups: bool = False) -> None:
     t = report.translator
     table = _kv_table()
     _add(table, t.get("ui.label.sha256"), report.file.sha256, "grey62")
     _add(table, t.get("ui.label.md5"), report.file.md5, "grey62")
     _add(table, t.get("ui.label.mime"), report.file.mime_type)
+    _add(table, t.get("ui.label.tag_groups"), _tag_groups(report, show_all_groups), "grey62")
     _section(console, t.get("ui.section.file"), table)
 
 
@@ -591,10 +793,65 @@ def _finding_table(entries: list[Finding], t: Translator, report: Report | None 
     return table
 
 
-def render_findings(console: Console, report: Report, show_info: bool = True) -> None:
+#: The two findings that explain an empty report: that the file came through a
+#: messenger, and that it is a screen capture rather than a photograph. They are
+#: INFO by findpic's own classification, so --quiet removed them — and on a
+#: screenshot that leaves a report saying "LIKELY ORIGINAL" with nothing
+#: anywhere to say nothing was ever photographed. Screenshot first: a screen
+#: capture that also lost its tags is still, first, a screen capture.
+PROVENANCE_FINDINGS = ("recovery.screenshot", "platform.stripped")
+
+
+def render_provenance(console: Console, report: Report) -> tuple[str, ...]:
+    """The one line that has to come before a verdict shaped like failure.
+
+    Above the verdicts rather than below them. The bot, which has done this for
+    longer, suppresses its verdict badge entirely here on the reasoning that a
+    verdict printed under a note explaining why the file has nothing to judge is
+    the same failure said twice; the terminal keeps its three axes but puts the
+    explanation first, so the reader has it before the grades rather than after.
+
+    Returns the ids it printed, so FINDINGS can leave them out instead of
+    saying the same thing twice in one report.
+    """
+    found = {finding.id: finding for finding in report.findings}
     t = report.translator
+    for finding in (found.get(fid) for fid in PROVENANCE_FINDINGS):
+        if finding is None:
+            continue
+        body = Text()
+        body.append(finding.title(t), style="bold white")
+        detail = finding.detail(t)
+        if detail:
+            body.append("\n")
+            body.append(detail, style="grey62")
+        console.print(Padding(body, (1, 0, 0, 1)))
+        return (finding.id,)
+    return ()
+
+
+def render_findings(
+    console: Console,
+    report: Report,
+    show_info: bool = True,
+    skip: tuple[str, ...] = (),
+) -> None:
+    t = report.translator
+    # A verdict must never stand above nothing. --quiet drops INFO findings, and
+    # on a file whose findings are *all* INFO that left "Privacy LOW EXPOSURE —
+    # a few details leak" over an empty list: the report asserting a leak and
+    # then declining to name it. Severity and weight are separate fields, so an
+    # INFO finding can still be what a verdict is built on; those stay.
+    cited = {
+        finding.id
+        for verdict in report.verdicts.values()
+        if verdict.level.rank > VerdictLevel.GOOD.rank
+        for finding in verdict.reasons
+    }
     findings = [
-        f for f in report.sorted_findings if show_info or f.severity.rank > Severity.INFO.rank
+        f
+        for f in report.sorted_findings
+        if f.id not in skip and (show_info or f.severity.rank > Severity.INFO.rank or f.id in cited)
     ]
     if not findings:
         return
@@ -662,13 +919,14 @@ def render_report(
         # it behind --notes. Say it instead, and grade nothing.
         render_notes(console, report)
         return
+    hoisted = render_provenance(console, report)
     render_verdicts(console, report)
     render_device(console, report)
     render_when(console, report)
     render_where(console, report)
     render_image(console, report)
     render_people(console, report)
-    render_findings(console, report, show_info=show_info)
-    render_integrity(console, report)
+    render_findings(console, report, show_info=show_info, skip=hoisted)
+    render_integrity(console, report, show_all_groups=show_notes)
     if show_notes:
         render_notes(console, report)

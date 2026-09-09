@@ -377,3 +377,143 @@ AI_GENERATOR_SIGNATURES: tuple[tuple[str, str, bool], ...] = (
     ("recraft", "Recraft", True),
     ("playground ai", "Playground AI", False),
 )
+
+
+# ---------------------------------------------- exiftool's own English prose
+#
+# exiftool decodes these numeric tags into English sentences, and findpic
+# printed them verbatim — so a Ukrainian report said "Орієнтація Rotate 90 CW"
+# and "Спалах Auto, Did not fire". There is no Ukrainian language pack for
+# exiftool (Lang/ ships cs de en es fi fr it ja ko nl pl ru sk sv tr zh), so
+# every one of these has to live in findpic's own catalogue.
+#
+# Mapped by exact string rather than by slugging the value: an unmapped value
+# would otherwise ask the catalogue for a key that does not exist, and a missing
+# key falls through to the English catalogue while failing the "no missing
+# translations" test. Out-of-range tags render as "Unknown (5)", which is
+# deliberately not in any of these tables — the raw string is the honest answer.
+#
+# The English side is the exiftool string verbatim, so English output does not
+# change and --json is untouched: extract.py keeps storing the raw value, and
+# `authenticity.jpeg_progressive` still substring-matches "progressive" on it.
+
+#: EXIF Orientation, all eight values.
+ORIENTATION_KEYS: dict[str, str] = {
+    "Horizontal (normal)": "exif.orientation.horizontal",
+    "Mirror horizontal": "exif.orientation.mirror_horizontal",
+    "Rotate 180": "exif.orientation.rotate_180",
+    "Mirror vertical": "exif.orientation.mirror_vertical",
+    "Mirror horizontal and rotate 270 CW": "exif.orientation.mirror_h_rotate_270",
+    "Rotate 90 CW": "exif.orientation.rotate_90_cw",
+    "Mirror horizontal and rotate 90 CW": "exif.orientation.mirror_h_rotate_90",
+    "Rotate 270 CW": "exif.orientation.rotate_270_cw",
+}
+
+#: EXIF Flash. The bit field decodes to twenty-seven strings, and the bot
+#: collapsed all of them into two sentences — losing the difference between a
+#: flash the photographer switched off and one the camera decided not to use,
+#: which is exactly what this row is read for — while printing nothing at all
+#: for the two "no flash function" values.
+FLASH_KEYS: dict[str, str] = {
+    "No Flash": "exif.flash.none",
+    "Fired": "exif.flash.fired",
+    "Fired, Return not detected": "exif.flash.fired_no_return",
+    "Fired, Return detected": "exif.flash.fired_return",
+    "On, Did not fire": "exif.flash.on_no_fire",
+    "On, Fired": "exif.flash.on_fired",
+    "On, Return not detected": "exif.flash.on_no_return",
+    "On, Return detected": "exif.flash.on_return",
+    "Off, Did not fire": "exif.flash.off",
+    "Off, Did not fire, Return not detected": "exif.flash.off_no_return",
+    "Auto, Did not fire": "exif.flash.auto_no_fire",
+    "Auto, Fired": "exif.flash.auto_fired",
+    "Auto, Fired, Return not detected": "exif.flash.auto_fired_no_return",
+    "Auto, Fired, Return detected": "exif.flash.auto_fired_return",
+    "No flash function": "exif.flash.absent",
+    "Off, No flash function": "exif.flash.absent",
+    "Fired, Red-eye reduction": "exif.flash.fired_redeye",
+    "Fired, Red-eye reduction, Return not detected": "exif.flash.fired_redeye_no_return",
+    "Fired, Red-eye reduction, Return detected": "exif.flash.fired_redeye_return",
+    "On, Red-eye reduction": "exif.flash.on_redeye",
+    "On, Red-eye reduction, Return not detected": "exif.flash.on_redeye_no_return",
+    "On, Red-eye reduction, Return detected": "exif.flash.on_redeye_return",
+    "Off, Red-eye reduction": "exif.flash.off_redeye",
+    "Auto, Did not fire, Red-eye reduction": "exif.flash.auto_no_fire_redeye",
+    "Auto, Fired, Red-eye reduction": "exif.flash.auto_fired_redeye",
+    "Auto, Fired, Red-eye reduction, Return not detected": "exif.flash.auto_fired_redeye_no_return",
+    "Auto, Fired, Red-eye reduction, Return detected": "exif.flash.auto_fired_redeye_return",
+}
+
+#: EXIF ExposureProgram.
+EXPOSURE_PROGRAM_KEYS: dict[str, str] = {
+    "Not Defined": "exif.program.undefined",
+    "Manual": "exif.program.manual",
+    "Program AE": "exif.program.program_ae",
+    "Aperture-priority AE": "exif.program.aperture_priority",
+    "Shutter speed priority AE": "exif.program.shutter_priority",
+    "Creative (Slow speed)": "exif.program.creative",
+    "Action (High speed)": "exif.program.action",
+    "Portrait": "exif.program.portrait",
+    "Landscape": "exif.program.landscape",
+    "Bulb": "exif.program.bulb",
+}
+
+#: JPEG SOF marker. Note exiftool's own inconsistent capitalisation of
+#: "Differential" in the lossless row — these are matched byte for byte.
+ENCODING_PROCESS_KEYS: dict[str, str] = {
+    "Baseline DCT, Huffman coding": "exif.encoding.baseline",
+    "Extended sequential DCT, Huffman coding": "exif.encoding.extended",
+    "Progressive DCT, Huffman coding": "exif.encoding.progressive",
+    "Lossless, Huffman coding": "exif.encoding.lossless",
+    "Sequential DCT, differential Huffman coding": "exif.encoding.sequential_diff",
+    "Progressive DCT, differential Huffman coding": "exif.encoding.progressive_diff",
+    "Lossless, Differential Huffman coding": "exif.encoding.lossless_diff",
+    "Extended sequential DCT, arithmetic coding": "exif.encoding.extended_arith",
+    "Progressive DCT, arithmetic coding": "exif.encoding.progressive_arith",
+    "Lossless, arithmetic coding": "exif.encoding.lossless_arith",
+    "Sequential DCT, differential arithmetic coding": "exif.encoding.sequential_diff_arith",
+    "Progressive DCT, differential arithmetic coding": "exif.encoding.progressive_diff_arith",
+    "Lossless, differential arithmetic coding": "exif.encoding.lossless_diff_arith",
+}
+
+#: EXIF ColorSpace, only where the value is prose. "sRGB", "Adobe RGB" and
+#: "Wide Gamut RGB" are the names of standards and stay as they are, as do the
+#: raw four-character ICC signatures (RGB, GRAY, CMYK, Lab) that reach the same
+#: field from ICC-header:ColorSpaceData.
+COLOR_SPACE_KEYS: dict[str, str] = {
+    "Uncalibrated": "exif.colorspace.uncalibrated",
+    "ICC Profile": "exif.colorspace.icc",
+}
+
+#: exiftool's GPSSpeedRef PrintConv. The interpretation beside it already says
+#: "км/год", so the raw echo put both spellings of one unit on a single line.
+SPEED_REF_KEYS: dict[str, str] = {
+    "km/h": "exif.speed_ref.kmh",
+    "mph": "exif.speed_ref.mph",
+    "knots": "exif.speed_ref.knots",
+}
+
+#: EXIF MeteringMode, WhiteBalance and SceneCaptureType — the three values of
+#: the Metering row, and exiftool's English prose like every table above it.
+METERING_KEYS: dict[str, str] = {
+    "Unknown": "exif.metering.unknown",
+    "Average": "exif.metering.average",
+    "Center-weighted average": "exif.metering.center_weighted",
+    "Spot": "exif.metering.spot",
+    "Multi-spot": "exif.metering.multi_spot",
+    "Multi-segment": "exif.metering.multi_segment",
+    "Partial": "exif.metering.partial",
+    "Other": "exif.metering.other",
+}
+
+WHITE_BALANCE_KEYS: dict[str, str] = {
+    "Auto": "exif.white_balance.auto",
+    "Manual": "exif.white_balance.manual",
+}
+
+SCENE_TYPE_KEYS: dict[str, str] = {
+    "Standard": "exif.scene.standard",
+    "Landscape": "exif.scene.landscape",
+    "Portrait": "exif.scene.portrait",
+    "Night": "exif.scene.night",
+}

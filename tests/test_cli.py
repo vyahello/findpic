@@ -238,3 +238,168 @@ def test_a_missing_direction_ref_is_not_reported_as_true_north(
     output = " ".join(capsys.readouterr().out.split())
     assert "349" in output
     assert "true or magnetic north" in output
+
+
+# ------------------------------------------------------------- WHEN (item C2)
+
+
+def _named(tmp_path: Path, source: Path, name: str) -> Path:
+    """A metadata-free copy under a name a messenger would have given it."""
+    import shutil
+    import subprocess
+
+    target = tmp_path / name
+    shutil.copy(source, target)
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-all=", str(target)],
+        check=True,
+        capture_output=True,
+    )
+    return target
+
+
+def test_a_stripped_file_has_no_when_section(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A heading promising when the photo was taken, over the date this copy
+    happened to be written to this disk, is worse than no heading."""
+    target = _named(tmp_path, camera_jpeg, "nothing-in-the-name.jpg")
+    main([str(target), *OFFLINE])
+    output = capsys.readouterr().out
+    assert " WHEN" not in output
+    assert "File saved" not in output
+
+
+def test_a_whatsapp_filename_puts_the_date_under_when(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = _named(tmp_path, camera_jpeg, "IMG-20230813-WA0002.jpg")
+    main([str(target), *OFFLINE])
+    output = " ".join(capsys.readouterr().out.split())
+    assert "WHEN" in output
+    assert "2023-08-13" in output.split("FINDINGS")[0]
+    assert "time of day not known" in output
+    assert "from the filename" in output
+
+
+def test_a_recovered_date_is_not_styled_like_a_tag(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It must never be mistaken for something the file actually says."""
+    target = _named(tmp_path, camera_jpeg, "IMG_20230813_145435.jpg")
+    main([str(target), *OFFLINE])
+    output = " ".join(capsys.readouterr().out.split())
+    assert "2023-08-13 14:54:35" in output
+    assert "from the filename, not the metadata" in output
+
+
+def test_summary_shows_a_recovered_date_rather_than_no_timestamp(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = _named(tmp_path, camera_jpeg, "IMG-20230813-WA0002.jpg")
+    main([str(target), "--summary", *OFFLINE])
+    output = capsys.readouterr().out
+    assert "(2023-08-13)" in output
+    assert "no timestamp" not in output
+
+
+def test_the_subsecond_reaches_the_taken_row(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A decimal fraction, not milliseconds: "052" is 52 thousandths and "5" is
+    half a second, so the digits go in exactly as recorded."""
+    import shutil
+    import subprocess
+
+    target = tmp_path / "subsec.jpg"
+    shutil.copy(camera_jpeg, target)
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-SubSecTimeOriginal=052", str(target)],
+        check=True,
+        capture_output=True,
+    )
+    main([str(target), *OFFLINE])
+    output = capsys.readouterr().out
+    assert "14:30:00.052" in output
+
+
+# ---------------------------------------------------------- --quiet (item C3)
+
+
+def test_quiet_keeps_the_screenshot_explanation(
+    samples_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both provenance findings are INFO, so the blanket filter removed the one
+    sentence that explains why everything else is empty."""
+    shot = samples_dir / "22.jpeg"
+    if not shot.exists():  # pragma: no cover - the owner's corpus
+        pytest.skip("sample not present")
+    main([str(shot), "--quiet", *OFFLINE])
+    output = " ".join(capsys.readouterr().out.split())
+    assert "screen capture" in output
+
+
+def test_the_provenance_line_is_not_printed_twice(
+    samples_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    shot = samples_dir / "22.jpeg"
+    if not shot.exists():  # pragma: no cover
+        pytest.skip("sample not present")
+    main([str(shot), *OFFLINE])
+    output = capsys.readouterr().out
+    assert output.count("This is a screen capture") == 1
+
+
+def test_quiet_never_leaves_a_verdict_standing_over_nothing(
+    tmp_path: Path, gps_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Severity and weight are separate fields, so an INFO finding can still be
+    what a verdict is built on. Hiding it left "a few details leak" over an
+    empty list — the report asserting a leak and declining to name it."""
+    import shutil
+
+    target = tmp_path / "photo.jpg"
+    shutil.copy(gps_jpeg, target)
+    main([str(target), "--quiet", *OFFLINE])
+    output = capsys.readouterr().out
+
+    from findpic.analysis import AnalysisOptions, analyze
+    from findpic.models import VerdictLevel
+
+    report = analyze(target, options=AnalysisOptions(geocode=False))
+    for verdict in report.verdicts.values():
+        if verdict.level.rank <= VerdictLevel.GOOD.rank or not verdict.reasons:
+            continue
+        assert "FINDINGS" in output, "a non-good verdict with no findings section"
+
+
+# ------------------------------------------------------------ IMAGE (item C5)
+
+
+def test_the_file_section_names_the_tag_groups(
+    camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Computed every run, stored on the model, in --json, rendered by nobody."""
+    main([str(camera_jpeg), *OFFLINE])
+    output = capsys.readouterr().out
+    assert "Tag groups" in output
+    # Scoped to the row itself: "System" is also the DEVICE section's OS label.
+    row = next(line for line in output.splitlines() if "Tag groups" in line)
+    assert "ExifIFD" in row
+    # Filesystem facts and exiftool's own derivations are not the file, and
+    # "Other" is exiftool's echo of the path rather than a group at all.
+    for absent in ("System", "ExifTool", "Composite", "Other"):
+        assert absent not in row, row
+
+
+def test_a_face_region_says_where_in_the_frame(
+    tmp_path: Path, named_people_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import shutil
+
+    target = tmp_path / "people.jpg"
+    shutil.copy(named_people_jpeg, target)
+    main([str(target), *OFFLINE])
+    output = " ".join(capsys.readouterr().out.split())
+    assert "In frame" in output
+    assert "of the frame" in output
