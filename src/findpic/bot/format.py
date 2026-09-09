@@ -37,6 +37,7 @@ from ..interpret import (
     describe_orientation_at_capture,
     describe_shutter,
     describe_subject_distance,
+    shutter_seconds,
 )
 from ..models import Category, Confidence, Finding, Report, Severity, VerdictLevel
 from ..recover import timestamp_from_filename
@@ -425,20 +426,6 @@ def render_where(report: Report) -> list[str]:
     return _block(t.get("bot.section.where"), lines)
 
 
-def _shutter_seconds(report: Report) -> float | None:
-    raw = report.raw.get("ExifIFD:ExposureTime") or report.raw.get("Composite:ShutterSpeed")
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    try:
-        if "/" in text:
-            numerator, denominator = text.split("/", 1)
-            return float(numerator) / float(denominator)
-        return float(text)
-    except (ValueError, ZeroDivisionError):
-        return None
-
-
 def render_shot(report: Report) -> list[str]:
     """The photographic facts, plus what they imply about the moment."""
     t, image, capture = report.translator, report.image, report.capture
@@ -483,7 +470,12 @@ def render_shot(report: Report) -> list[str]:
     stabilised = report.raw.get("Apple:OISMode") is not None
     for note in (
         describe_light(capture.light_value),
-        describe_shutter(_shutter_seconds(report), stabilised=bool(stabilised)),
+        describe_shutter(
+            shutter_seconds(
+                report.raw.get("ExifIFD:ExposureTime") or report.raw.get("Composite:ShutterSpeed")
+            ),
+            stabilised=bool(stabilised),
+        ),
         describe_subject_distance(report.raw.get("Apple:FocusDistanceRange")),
         describe_orientation_at_capture(report.raw.get("Apple:AccelerationVector")),
     ):

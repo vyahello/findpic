@@ -200,6 +200,13 @@ def _operating_system(meta: Metadata, device: DeviceInfo) -> str | None:
         return None
 
     lowered = software.lower()
+    # First, not last. This guard existed to stop an editor being reported as an
+    # operating system, and sat *below* the platform tests — so "Adobe Photoshop
+    # 24.0 (Windows)" matched `"windows" in lowered` and printed as the System,
+    # two lines above the Editor row naming the same string. Whatever platform
+    # name sits in an application's parentheses, the application is not an OS.
+    if match_editor(software):
+        return None
     if lowered.startswith("android"):
         return software
     if "windows" in lowered:
@@ -208,9 +215,6 @@ def _operating_system(meta: Metadata, device: DeviceInfo) -> str | None:
         return software
     if "linux" in lowered:
         return software
-    # A Software value we recognise as an app is reported as an editor, not an OS.
-    if match_editor(software):
-        return None
     # A build identifier is not an OS version, and printing "samsung SM-S911B ·
     # S911BXXU3AWK5" invites the reader to take a firmware serial for Android.
     # Both patterns have always been defined and neither was ever wired up.

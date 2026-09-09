@@ -22,6 +22,19 @@ from rich.table import Table
 from rich.text import Text
 
 from ..i18n import Translator
+from ..interpret import (
+    Note,
+    aspect_ratio,
+    describe_accuracy,
+    describe_altitude,
+    describe_direction,
+    describe_light,
+    describe_movement,
+    describe_orientation_at_capture,
+    describe_shutter,
+    describe_subject_distance,
+    shutter_seconds,
+)
 from ..models import Category, Finding, Report, Severity, VerdictLevel
 from ..util import format_datetime, parse_exif_datetime
 
@@ -114,6 +127,41 @@ def safe(value: object) -> Text:
     escaped its output since it was written; the terminal path never did.
     """
     return Text(str(value).translate(_CONTROL).translate(_BIDI))
+
+
+def _note(note: Note | None, t: Translator) -> str | None:
+    """Render an interpretation, resolving any nested catalogue key it carries.
+
+    The ``{name}_key`` convention exists so a rule can hand over "north-north-
+    east" as a key rather than a word — the analysis is language-neutral and
+    the compass points are not.
+    """
+    if note is None:
+        return None
+    params = dict(note.params)
+    for name, value in list(params.items()):
+        if name.endswith("_key"):
+            params[name[: -len("_key")]] = t.get(str(value))
+            params.pop(name)
+    return t.get(note.key, **params)
+
+
+def _note_row(
+    table: Table, label: str, note: Note | None, t: Translator, raw: object = None
+) -> None:
+    """A row whose value is an interpretation, with the reading beside it.
+
+    The terminal's advantage over a chat message is that it has room for both.
+    "You were travelling ~28 km/h" is what a reader wants; "27.81 km/h" is what
+    a forensic reader needs to be able to check it against, so neither is
+    dropped.
+    """
+    rendered = _note(note, t)
+    if not rendered:
+        return
+    if raw not in (None, ""):
+        rendered = t.get("ui.value.recorded", value=rendered, raw=raw)
+    _add(table, label, rendered)
 
 
 def _add(table: Table, label: str, value: object, style: str = "") -> None:
@@ -251,17 +299,33 @@ def render_when(console: Console, report: Report) -> None:
 
 
 def render_where(console: Console, report: Report) -> None:
+    """Where it was taken, with every number given a scale.
+
+    Each row here used to be a bare measurement: "±21.8535 m", "349° N",
+    "27.81 km/h". `interpret.py` has turned each of those into a sentence since
+    it was written, in both languages, and the terminal imported none of it —
+    so the front end with the most room to explain explained the least.
+    """
     t, location = report.translator, report.location
     if not location.present:
         return
     table = _kv_table()
 
-    coordinates = location.decimal or ""
-    if location.accuracy_m:
-        coordinates = t.get(
-            "ui.value.accuracy", coords=coordinates, metres=f"{location.accuracy_m:g}"
-        )
-    _add(table, t.get("ui.label.coordinates"), coordinates, "bold white")
+    _add(table, t.get("ui.label.coordinates"), location.decimal, "bold white")
+    if location.accuracy_m is not None:
+        # Not `detail.accuracy.*` as a row value: in Ukrainian those embed the
+        # word "Точність", which is the label this row already carries.
+        scale = describe_accuracy(location.accuracy_m)
+        if scale is not None:
+            _add(
+                table,
+                t.get("ui.label.accuracy"),
+                t.get(
+                    "ui.value.accuracy_row",
+                    metres=scale.params.get("value", location.accuracy_m),
+                    scale=t.get(scale.key.replace("detail.accuracy.", "scale.accuracy.")),
+                ),
+            )
     _add(table, t.get("ui.label.dms"), location.dms)
     if location.place:
         _add(table, t.get("ui.label.place"), location.place, "bold white")
@@ -274,54 +338,55 @@ def render_where(console: Console, report: Report) -> None:
         )
 
     if location.altitude_m is not None:
-        below = (location.altitude_ref or "").lower().startswith("below")
-        _add(
+        # Shared with the bot, and it takes abs() there: exiftool already signs
+        # the value for GPSAltitudeRef=1, so a Dead Sea photo printed
+        # "-413.2 m below sea level" — literally above.
+        _note_row(
             table,
             t.get("ui.label.altitude"),
-            t.get(
-                "ui.value.altitude",
-                metres=f"{location.altitude_m:.1f}",
-                reference=t.get(
-                    "ui.value.below_sea_level" if below else "ui.value.above_sea_level"
-                ),
+            describe_altitude(
+                location.altitude_m,
+                below=(location.altitude_ref or "").lower().startswith("below"),
             ),
+            t,
         )
+
     if location.direction_deg is not None:
-        magnetic = (location.direction_ref or "").lower().startswith("m")
-        _add(
-            table,
-            t.get("ui.label.facing"),
-            t.get(
-                "ui.value.facing",
-                degrees=f"{location.direction_deg:.0f}",
-                point=t.compass(location.direction_deg),
-                reference=t.get("ui.value.magnetic_north" if magnetic else "ui.value.true_north"),
-            ),
+        reference = (location.direction_ref or "").strip().lower()
+        # Three states, not two. Exif has no default for GPSImgDirectionRef, so
+        # an absent one is "the file did not say" rather than "true north".
+        magnetic = None if not reference else reference.startswith("m")
+        _note_row(
+            table, t.get("ui.label.facing"), describe_direction(location.direction_deg, magnetic), t
         )
+
     if location.speed is not None:
-        if location.speed == 0:
-            _add(table, t.get("ui.label.movement"), t.get("ui.value.stationary"))
-        else:
-            _add(
-                table,
-                t.get("ui.label.movement"),
-                t.get(
-                    "ui.value.moving",
-                    speed=f"{location.speed:g}",
-                    unit=location.speed_ref or "",
-                ).strip(),
-            )
-    _add(table, t.get("ui.label.fix_method"), location.processing_method)
-    if location.osm_url:
-        # A terminal hyperlink, so a 90-character URL does not wrap across three
-        # lines. Terminals without link support still show the label.
-        table.add_row(
-            t.get("ui.label.map"),
-            Text(
-                t.get("ui.value.open_map"),
-                style=f"blue underline link {location.osm_url}",
-            ),
+        _note_row(
+            table,
+            t.get("ui.label.movement"),
+            describe_movement(location.speed, location.speed_ref),
+            t,
+            raw=f"{location.speed:g} {location.speed_ref}" if location.speed_ref else None,
         )
+
+    if location.present:
+        # The URL itself, not the words "open in OpenStreetMap".
+        #
+        # It was rendered as an OSC 8 hyperlink over a label, and rich emits
+        # that correctly — but a terminal that does not support OSC 8 shows the
+        # label and nothing else, so the reader has a map they cannot open and
+        # a URL they cannot copy. Printing the address works everywhere: it is
+        # selectable, most terminals linkify a bare URL of their own accord, and
+        # where OSC 8 *is* supported it is still one click.
+        #
+        # osm.org rather than openstreetmap.org, and no #map fragment: the
+        # canonical form is 87 characters and folds across two lines in an
+        # 80-column terminal, which is exactly what makes a URL uncopyable.
+        # This is 46 and points at the same marker. `location.osm_url` keeps
+        # the long form for the JSON output and the bot, where width is not a
+        # constraint.
+        url = f"https://osm.org/?mlat={location.latitude:.6f}&mlon={location.longitude:.6f}"
+        table.add_row(t.get("ui.label.map"), Text(url, style=f"blue underline link {url}"))
     _section(console, t.get("ui.section.where"), table)
 
 
@@ -330,14 +395,25 @@ def render_image(console: Console, report: Report) -> None:
     table = _kv_table()
 
     dimensions = image.dimensions
+    ratio = aspect_ratio(image.width, image.height)
     if dimensions and image.megapixels:
         dimensions = t.get(
-            "ui.value.dimensions",
+            "ui.value.dimensions_ratio" if ratio else "ui.value.dimensions",
             size=dimensions,
             megapixels=f"{image.megapixels:.1f}",
+            ratio=ratio or "",
         )
     _add(table, t.get("ui.label.dimensions"), dimensions)
     _add(table, t.get("ui.label.orientation"), image.orientation)
+    # Directly under Orientation on purpose: that row is the display flag the
+    # file carries, this one is how the device was actually being held, and a
+    # reader can only notice they disagree when the two sit together.
+    _note_row(
+        table,
+        t.get("ui.label.held"),
+        describe_orientation_at_capture(report.raw.get("Apple:AccelerationVector")),
+        t,
+    )
 
     exposure = " · ".join(
         part
@@ -350,6 +426,30 @@ def render_image(console: Console, report: Report) -> None:
         if part
     )
     _add(table, t.get("ui.label.exposure"), exposure)
+    # Five readings that already existed, were already translated, and reached
+    # only the bot. The terminal has more room than a chat message and was
+    # showing less.
+    _note_row(table, t.get("ui.label.light"), describe_light(capture.light_value), t)
+    _note_row(
+        table,
+        t.get("ui.label.shutter"),
+        describe_shutter(
+            shutter_seconds(
+                report.raw.get("ExifIFD:ExposureTime") or report.raw.get("Composite:ShutterSpeed")
+            ),
+            # The tag's presence only. exiftool does not decode OISMode, so
+            # what the value means is not established.
+            stabilised=report.raw.get("Apple:OISMode") is not None,
+        ),
+        t,
+    )
+    _note_row(
+        table,
+        t.get("ui.label.focus"),
+        describe_subject_distance(report.raw.get("Apple:FocusDistanceRange")),
+        t,
+        raw=report.raw.get("Apple:FocusDistanceRange"),
+    )
     _add(table, t.get("ui.label.flash"), capture.flash)
     _add(table, t.get("ui.label.program"), capture.exposure_program)
     _add(table, t.get("ui.label.colour"), image.icc_profile or image.color_space)
@@ -463,6 +563,17 @@ def render_notes(console: Console, report: Report) -> None:
     _section(console, t.get("ui.section.notes"), table)
 
 
+def unreadable(report: Report) -> bool:
+    """Whether exiftool could not make sense of this file at all.
+
+    Both conditions, deliberately. A format error alone turns up on files that
+    are otherwise perfectly readable — a truncated thumbnail, a malformed XMP
+    packet — and those still deserve a report. It is the *combination* with no
+    identified file type that means there was nothing to read.
+    """
+    return bool(report.errors) and not report.file.file_type
+
+
 def render_report(
     console: Console,
     report: Report,
@@ -471,6 +582,14 @@ def render_report(
 ) -> None:
     """Print one complete report."""
     render_header(console, report)
+    if unreadable(report):
+        # Three confident verdicts on 800 bytes of random data — including
+        # "Privacy CLEAN, this file carries almost no metadata, so there is
+        # nothing to leak" — is the tool grading a file it could not open.
+        # exiftool said "File format error"; findpic collected it and then hid
+        # it behind --notes. Say it instead, and grade nothing.
+        render_notes(console, report)
+        return
     render_verdicts(console, report)
     render_device(console, report)
     render_when(console, report)

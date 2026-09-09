@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from findpic.exif import (
     ExifTool,
+    ExifToolError,
     ExifToolTimeout,
     Metadata,
     UnreadableFile,
@@ -165,3 +167,64 @@ def test_hash_file_matches_hashlib(camera_jpeg: Path) -> None:
     sha, md5 = hash_file(camera_jpeg)
     assert sha == hashlib.sha256(data).hexdigest()
     assert md5 == hashlib.md5(data).hexdigest()
+
+
+# ----------------------------------------------------------- reading the file
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a mode-000 file")
+def test_an_unreadable_file_raises_rather_than_returning_nothing(
+    tmp_path: Path, camera_jpeg: Path
+) -> None:
+    """A file nobody read must not get a verdict.
+
+    Every check before this one asks the *directory* about the file, so a
+    mode-000 photograph passed them all, exiftool returned nothing, and the
+    empty-metadata rules graded it "Privacy: CLEAN — nothing to leak".
+    """
+    target = tmp_path / "locked.jpg"
+    target.write_bytes(camera_jpeg.read_bytes())
+    target.chmod(0o000)
+    try:
+        with pytest.raises(UnreadableFile):
+            ExifTool().read(target)
+    finally:
+        target.chmod(0o644)
+
+
+def _stub_exiftool(directory: Path, body: str) -> str:
+    """A shell script standing in for exiftool, first on PATH."""
+    script = directory / "exiftool"
+    script.write_text('#!/bin/sh\nif [ "$1" = "-ver" ]; then echo "13.10"; exit 0; fi\n' + body)
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_a_truncated_exiftool_stdout_is_not_treated_as_complete(
+    tmp_path: Path, camera_jpeg: Path
+) -> None:
+    """Half the blocks plus a non-zero status used to read as a clean file.
+
+    The verdict flipped, the whole WHERE section vanished, `errors` stayed
+    empty and the exit code was identical to a healthy run.
+    """
+    binary = _stub_exiftool(
+        tmp_path,
+        # One valid block of four, then the death of a killed process.
+        'printf \'[{"SourceFile":"%s"}]\\n\' "$1" 2>/dev/null || true\n'
+        f'echo \'[{{"SourceFile":"{camera_jpeg}","IFD0:Model":"TestCam 900"}}]\'\n'
+        "exit 137\n",
+    )
+    meta = ExifTool(binary=binary).read(camera_jpeg)
+    assert meta.incomplete is not None
+    code, got, expected = meta.incomplete
+    assert code == 137
+    assert got < expected
+
+
+def test_no_output_at_all_is_an_error_not_an_empty_report(
+    tmp_path: Path, camera_jpeg: Path
+) -> None:
+    binary = _stub_exiftool(tmp_path, 'echo "Killed" >&2\nexit 137\n')
+    with pytest.raises(ExifToolError):
+        ExifTool(binary=binary).read(camera_jpeg)

@@ -294,3 +294,24 @@ def test_no_catalogue_key_is_missing_when_analysing_real_files(
         assert not translator.missing, (
             f"{language} catalogue is missing {sorted(translator.missing)}"
         )
+
+
+def test_no_catalogue_string_names_a_sample_file() -> None:
+    """A report headed IMG_1312.JPG told its reader about IMG_2781.
+
+    `note.apple` was written against a file in the author's own corpus and
+    never parameterised — the same class of defect as a `fix:` command that
+    names photo.jpg. `Translator.get` swallows a missing placeholder, so a
+    half-migrated template degrades silently and nothing else would catch it.
+    """
+    import re
+
+    pattern = re.compile(r"IMG_\d{4}|DSC\d|PXL_\d")
+    for language in available_languages():
+        catalog = load_catalog(language)
+        named = {
+            key: value
+            for key, value in catalog.items()
+            if isinstance(value, str) and pattern.search(value)
+        }
+        assert not named, f"{language}: {named}"

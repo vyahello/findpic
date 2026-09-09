@@ -7,7 +7,9 @@ photograph. Anything can be stripped. A silent file is not evidence of anything.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
+from functools import cache
 
 from ..models import Category, Confidence, Finding, Severity
 from ..tables import AI_GENERATOR_SIGNATURES, DIGITAL_SOURCE_TYPES
@@ -15,22 +17,51 @@ from ..util import truncate
 from .context import Context
 from .registry import rule
 
-#: Fields a generator is likely to sign its name in.
-PROVENANCE_TAGS = (
+#: Fields a generator writes its own name into. A value here was put there by
+#: software describing itself, so a match is evidence about the file.
+SIGNING_TAGS = (
     "IFD0:Software",
     "XMP-xmp:CreatorTool",
-    "XMP-dc:Creator",
-    "XMP-dc:Description",
     "XMP-photoshop:Credit",
-    "ExifIFD:UserComment",
-    "IFD0:ImageDescription",
-    "File:Comment",
     "PNG:Software",
     "PNG:Parameters",
+)
+
+#: Free text a *person* wrote. A match here is evidence about the sentence, not
+#: about the photograph: people write "gemini", "flux" and "imagen" in captions
+#: for reasons that have nothing to do with how the picture was made.
+CAPTION_TAGS = (
+    "XMP-dc:Description",
+    "XMP-dc:Creator",
+    "ExifIFD:UserComment",
+    "XMP-exif:UserComment",
+    "IFD0:ImageDescription",
+    "File:Comment",
     "PNG:Comment",
     "PNG:Description",
-    "XMP-exif:UserComment",
 )
+
+
+@cache
+def _pattern(needle: str) -> re.Pattern[str]:
+    """Word boundaries, not substrings.
+
+    ``imagen`` inside the Spanish "la imagen fue tomada en Madrid" was accusing
+    a real photograph of being AI-generated, and ``flux`` inside "magnetic flux
+    experiment" did the same. The boundary is alphanumeric rather than ``\b``
+    so that ``leonardo.ai`` and ``dall-e`` — needles that contain punctuation —
+    still match at their own edges.
+    """
+    return re.compile(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])")
+
+
+def _names(lowered: str, captions: bool) -> tuple[str, ...]:
+    """Every generator named in one value, believed-anywhere needles first."""
+    return tuple(
+        name
+        for needle, name, signing_only in AI_GENERATOR_SIGNATURES
+        if not (captions and signing_only) and _pattern(needle).search(lowered)
+    )
 
 
 @rule("declared_source_type", Category.AI, order=1)
@@ -65,102 +96,44 @@ def declared_source_type(context: Context) -> Iterable[Finding]:
 
 @rule("generator_signature", Category.AI, order=2)
 def generator_signature(context: Context) -> Iterable[Finding]:
-    """A generator naming itself in a metadata field."""
-    hits: dict[str, str] = {}
-    for tag in PROVENANCE_TAGS:
-        value = context.meta.str(tag)
-        if not value:
-            continue
-        lowered = value.lower()
-        for needle, name in AI_GENERATOR_SIGNATURES:
-            if needle in lowered:
-                hits.setdefault(name, f"{tag} = {truncate(value, 80)}")
-                break
+    """A generator naming itself in a metadata field.
 
-    if not hits:
-        return
-    yield Finding(
-        id="ai.generator_signature",
-        category=Category.AI,
-        severity=Severity.WARNING,
-        confidence=Confidence.MEDIUM,
-        params={"names": ", ".join(hits)},
-        evidence=hits,
-    )
+    Two findings, because there are two different claims. Software that signed
+    a field is evidence about the file. A person who typed a tool's name into a
+    caption is evidence about the caption, and saying so at WARNING — on a file
+    the same report grades ORIGINAL — is the most damaging sentence this tool
+    can print.
+    """
+    signed: dict[str, str] = {}
+    mentioned: dict[str, str] = {}
+    for tags, hits, captions in ((SIGNING_TAGS, signed, False), (CAPTION_TAGS, mentioned, True)):
+        for tag in tags:
+            value = context.meta.str(tag)
+            if not value:
+                continue
+            evidence = f"{tag} = {truncate(value, 80)}"
+            for name in _names(value.lower(), captions=captions):
+                hits.setdefault(name, evidence)
 
+    # A tool that signed the file and is also named in the caption is one fact.
+    for name in signed:
+        mentioned.pop(name, None)
 
-@rule("diffusion_parameters", Category.AI, order=3)
-def diffusion_parameters(context: Context) -> Iterable[Finding]:
-    """The prompt/seed block that Stable Diffusion front-ends write into PNGs."""
-    # A1111 writes to Parameters; ComfyUI to Workflow/Prompt; converters and
-    # "save as JPEG" paths frequently dump the same block into a comment.
-    candidates = (
-        "PNG:Parameters",
-        "Parameters",
-        "PNG:Prompt",
-        "PNG:Workflow",
-        "PNG:Comment",
-        "File:Comment",
-        "ExifIFD:UserComment",
-        "IFD0:ImageDescription",
-    )
-    for tag in candidates:
-        value = context.meta.str(tag)
-        if not value:
-            continue
-        markers = sum(
-            marker in value.lower()
-            for marker in (
-                "steps:",
-                "sampler:",
-                "cfg scale",
-                "seed:",
-                "model hash",
-                "negative prompt",
-                "denoising strength",
-            )
-        )
-        # One keyword could be coincidence in a caption; three is a parameter block.
-        if not (markers >= 3 or tag.endswith(("Parameters", "Workflow", "Prompt"))):
-            continue
+    if signed:
         yield Finding(
-            id="ai.diffusion_parameters",
+            id="ai.generator_signature",
             category=Category.AI,
             severity=Severity.WARNING,
-            confidence=Confidence.HIGH,
-            params={"sample": truncate(value, 160)},
-            evidence={tag: truncate(value, 500)},
+            confidence=Confidence.MEDIUM,
+            params={"names": ", ".join(signed)},
+            evidence=signed,
         )
-        return
-
-
-@rule("content_credentials", Category.AI, order=4)
-def content_credentials(context: Context) -> Iterable[Finding]:
-    """A C2PA manifest — present, but not verified by us."""
-    meta = context.meta
-    if not (meta.has_group("JUMBF") or meta.has("JUMBF:JUMDLabel", "C2PA")):
-        return
-    yield Finding(
-        id="ai.c2pa_manifest",
-        category=Category.AI,
-        severity=Severity.INFO,
-        confidence=Confidence.HIGH,
-        params={"filename": context.file.name},
-        evidence={"groups": sorted(g for g in meta.group_names() if "JUMBF" in g.upper())},
-    )
-
-
-@rule("no_provenance_context", Category.AI, order=9)
-def no_provenance_context(context: Context) -> Iterable[Finding]:
-    """State the limit explicitly rather than letting silence imply 'genuine'."""
-    if context.device.has_makernotes or context.has_camera_identity:
-        return
-    if context.meta.tag_count > 40:
-        return
-    yield Finding(
-        id="ai.cannot_determine",
-        category=Category.AI,
-        severity=Severity.INFO,
-        confidence=Confidence.HIGH,
-        evidence={"tag_count": context.meta.tag_count},
-    )
+    if mentioned:
+        yield Finding(
+            id="ai.generator_mentioned",
+            category=Category.AI,
+            severity=Severity.NOTICE,
+            confidence=Confidence.LOW,
+            params={"names": ", ".join(mentioned)},
+            evidence=mentioned,
+        )

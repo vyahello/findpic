@@ -228,6 +228,27 @@ def apple_os_name(model: str | None) -> str:
 #: and whose meaning nobody has pinned down. findpic assigned them meanings
 #: anyway, so samples/IMG_1312.JPG (which carries 5) was reported as a plain
 #: "Photo" on the strength of a guess.
+#: What exiftool can put in ``GPSSpeedRef``, mapped to a unit. Both the raw
+#: single letters of the numeric pass and the words its PrintConv produces.
+#:
+#: A table because the previous prefix tests read "knots" as km/h — it starts
+#: with a k, and that branch was tested before the n one — so a boat at 45
+#: knots was reported as 46 km/h instead of 85. "M" for miles per hour fell
+#: through to km/h for the same reason.
+GPS_SPEED_REF: dict[str, str] = {
+    "km/h": "kmh",
+    "kmh": "kmh",
+    "k": "kmh",
+    "mph": "mph",
+    "m": "mph",
+    "knots": "knots",
+    "kn": "knots",
+    "n": "knots",
+}
+
+#: Into kilometres per hour, which is what the bands below are expressed in.
+SPEED_TO_KMH: dict[str, float] = {"kmh": 1.0, "mph": 1.609344, "knots": 1.852}
+
 APPLE_IMAGE_CAPTURE_TYPE: dict[int, str] = {
     1: "proraw",
     2: "portrait",
@@ -319,32 +340,40 @@ DIGITAL_SOURCE_TYPES: dict[str, bool] = {
     "datadrivenmedia": False,
 }
 
-#: Substring -> generator name, matched across Software/CreatorTool/XMP/comments.
-AI_GENERATOR_SIGNATURES: tuple[tuple[str, str], ...] = (
-    ("midjourney", "Midjourney"),
-    ("dall-e", "OpenAI DALL·E"),
-    ("dall·e", "OpenAI DALL·E"),
-    ("openai", "OpenAI"),
-    ("chatgpt", "ChatGPT"),
-    ("stable diffusion", "Stable Diffusion"),
-    ("stablediffusion", "Stable Diffusion"),
-    ("automatic1111", "Stable Diffusion (AUTOMATIC1111)"),
-    ("comfyui", "ComfyUI"),
-    ("invokeai", "InvokeAI"),
-    ("adobe firefly", "Adobe Firefly"),
-    ("firefly", "Adobe Firefly"),
-    ("leonardo.ai", "Leonardo.Ai"),
-    ("ideogram", "Ideogram"),
-    ("flux", "Flux"),
-    ("imagen", "Google Imagen"),
-    ("gemini", "Google Gemini"),
-    ("grok", "xAI Grok"),
-    ("nightcafe", "NightCafe"),
-    ("dreamstudio", "DreamStudio"),
-    ("novelai", "NovelAI"),
-    ("craiyon", "Craiyon"),
-    ("bing image creator", "Bing Image Creator"),
-    ("designer.microsoft", "Microsoft Designer"),
-    ("recraft", "Recraft"),
-    ("playground ai", "Playground AI"),
+#: ``(needle, generator, signing_only)``, matched on word boundaries.
+#:
+#: ``signing_only`` marks a needle that is also an ordinary English or Spanish
+#: word. "Flux", "Imagen", "Gemini", "Grok" and the rest appear in captions
+#: written by people about photographs they took themselves — a Canon original
+#: captioned "Sunrise over the Gemini Observatory" was being told, at WARNING,
+#: that its metadata named an AI tool. Those needles are believed only where a
+#: generator actually signs its work; the unambiguous ones are believed
+#: anywhere.
+AI_GENERATOR_SIGNATURES: tuple[tuple[str, str, bool], ...] = (
+    ("midjourney", "Midjourney", False),
+    ("dall-e", "OpenAI DALL·E", False),
+    ("dall·e", "OpenAI DALL·E", False),
+    ("openai", "OpenAI", True),
+    ("chatgpt", "ChatGPT", True),
+    ("stable diffusion", "Stable Diffusion", False),
+    ("stablediffusion", "Stable Diffusion", False),
+    ("automatic1111", "Stable Diffusion (AUTOMATIC1111)", False),
+    ("comfyui", "ComfyUI", False),
+    ("invokeai", "InvokeAI", False),
+    ("adobe firefly", "Adobe Firefly", False),
+    ("firefly", "Adobe Firefly", True),
+    ("leonardo.ai", "Leonardo.Ai", False),
+    ("ideogram", "Ideogram", True),
+    ("flux", "Flux", True),
+    ("imagen", "Google Imagen", True),
+    ("gemini", "Google Gemini", True),
+    ("grok", "xAI Grok", True),
+    ("nightcafe", "NightCafe", False),
+    ("dreamstudio", "DreamStudio", False),
+    ("novelai", "NovelAI", False),
+    ("craiyon", "Craiyon", True),
+    ("bing image creator", "Bing Image Creator", False),
+    ("designer.microsoft", "Microsoft Designer", False),
+    ("recraft", "Recraft", True),
+    ("playground ai", "Playground AI", False),
 )

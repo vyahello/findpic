@@ -15,6 +15,8 @@ come from the message catalogue at render time.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from ..models import Category, Finding, Severity, Verdict, VerdictLevel
 from .context import Context
 
@@ -132,8 +134,18 @@ def structure_verdict(context: Context, findings: list[Finding]) -> Verdict:
 
 
 def build_verdicts(context: Context, findings: list[Finding]) -> dict[str, Verdict]:
-    return {
+    verdicts = {
         "originality": originality_verdict(context, findings),
         "privacy": privacy_verdict(context, findings),
         "structure": structure_verdict(context, findings),
     }
+    if any(f.id == "structural.extraction_incomplete" for f in findings):
+        # Every axis here is an argument from absence: "no editor traces", "no
+        # coordinates", "nothing unusual in the structure". When the extraction
+        # stopped early, absence proves nothing, and a reassuring verdict built
+        # on it is worse than no verdict at all. The bad ones stand — what was
+        # found was still found.
+        for axis, verdict in verdicts.items():
+            if verdict.level.rank <= VerdictLevel.FAIR.rank:
+                verdicts[axis] = replace(verdict, level=VerdictLevel.UNKNOWN)
+    return verdicts

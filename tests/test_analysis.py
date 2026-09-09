@@ -352,3 +352,134 @@ def test_a_camera_original_gets_no_recovery_findings(camera_jpeg: Path) -> None:
     """
     ids = finding_ids(run(camera_jpeg))
     assert not {i for i in ids if i.startswith("recovery.") and i != "recovery.filename_time"}
+
+
+# --------------------------------------------------- ai: caption vs signature
+
+
+def _tagged(source: Path, target: Path, *tags: str) -> Path:
+    import subprocess
+
+    target.write_bytes(source.read_bytes())
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", *tags, str(target)],
+        check=True,
+        capture_output=True,
+    )
+    return target
+
+
+def test_a_caption_about_the_gemini_observatory_is_not_an_ai_accusation(
+    tmp_path: Path, camera_jpeg: Path
+) -> None:
+    """The most damaging sentence the tool can print, fired by ordinary prose.
+
+    A real photograph captioned with the name of an observatory was being told,
+    at WARNING, that its metadata named an AI image tool.
+    """
+    target = _tagged(
+        camera_jpeg,
+        tmp_path / "observatory.jpg",
+        "-XMP-dc:Description=Sunrise over the Gemini Observatory",
+        "-ExifIFD:UserComment=magnetic flux experiment",
+    )
+    ids = finding_ids(run(target))
+    assert "ai.generator_signature" not in ids
+    assert "ai.generator_mentioned" not in ids
+
+
+def test_spanish_la_imagen_does_not_match_imagen(tmp_path: Path, camera_jpeg: Path) -> None:
+    """Word boundaries. "la imagen" is not Google Imagen."""
+    target = _tagged(
+        camera_jpeg,
+        tmp_path / "madrid.jpg",
+        "-XMP-dc:Description=La imagen fue tomada en Madrid",
+    )
+    assert not {i for i in finding_ids(run(target)) if i.startswith("ai.")}
+
+
+def test_a_signing_field_still_fires_at_warning(tmp_path: Path, camera_jpeg: Path) -> None:
+    target = _tagged(camera_jpeg, tmp_path / "signed.jpg", "-IFD0:Software=Midjourney v6")
+    finding = next(f for f in run(target).findings if f.id == "ai.generator_signature")
+    assert finding.severity is Severity.WARNING
+    assert "Midjourney" in finding.params["names"]
+
+
+def test_a_caption_naming_midjourney_is_a_notice(tmp_path: Path, camera_jpeg: Path) -> None:
+    """Unambiguous name, ambiguous field: report it, quietly."""
+    target = _tagged(
+        camera_jpeg, tmp_path / "caption.jpg", "-XMP-dc:Description=made in Midjourney"
+    )
+    ids = finding_ids(run(target))
+    assert "ai.generator_signature" not in ids
+    finding = next(f for f in run(target).findings if f.id == "ai.generator_mentioned")
+    assert finding.severity is Severity.NOTICE
+    assert finding.confidence is Confidence.LOW
+
+
+# ------------------------------------------------------- extraction integrity
+
+
+def test_an_incomplete_extraction_cannot_produce_a_clean_privacy_verdict(
+    monkeypatch: pytest.MonkeyPatch, blank_jpeg: Path
+) -> None:
+    """A tool that stopped looking must not report that it found nothing.
+
+    ``blank_jpeg`` carries no metadata at all, so every axis would otherwise be
+    reassuring — which is exactly the file where a half-finished read is most
+    dangerous.
+    """
+    clean = run(blank_jpeg)
+    assert clean.verdicts["privacy"].level is not VerdictLevel.UNKNOWN
+
+    real_read = ExifTool.read
+
+    def truncated(self: ExifTool, path: Path, validate: bool = True):  # type: ignore[no-untyped-def]
+        meta = real_read(self, path, validate=validate)
+        meta.incomplete = (137, 1, 4)
+        return meta
+
+    monkeypatch.setattr(ExifTool, "read", truncated)
+    report = run(blank_jpeg)
+    assert "structural.extraction_incomplete" in finding_ids(report)
+    assert report.verdicts["privacy"].level is VerdictLevel.UNKNOWN
+    assert report.verdicts["originality"].level is VerdictLevel.UNKNOWN
+
+
+def test_an_editor_naming_windows_is_not_an_operating_system(
+    tmp_path: Path, camera_jpeg: Path
+) -> None:
+    """Two adjacent rows of one table, one of them false.
+
+    "System: Adobe Photoshop 24.0 (Windows)" sat directly above
+    "Editor: Adobe Photoshop".
+    """
+    for software in (
+        "Adobe Photoshop 24.0 (Windows)",
+        "Adobe Photoshop Lightroom Classic 12.0 (Windows)",
+        "Windows Photo Editor 10.0.10011.16384",
+    ):
+        target = _tagged(camera_jpeg, tmp_path / "edited.jpg", f"-IFD0:Software={software}")
+        assert run(target).device.os is None, software
+
+    target = _tagged(camera_jpeg, tmp_path / "phone.jpg", "-IFD0:Software=Windows Phone 8.1")
+    assert run(target).device.os == "Windows Phone 8.1"
+
+
+def test_accuracy_prose_does_not_claim_four_decimals(tmp_path: Path, camera_jpeg: Path) -> None:
+    """ "about 21.8535 metres" — "about" and a tenth of a millimetre, in one sentence."""
+    from findpic.i18n import Translator
+
+    target = _tagged(
+        camera_jpeg,
+        tmp_path / "precise.jpg",
+        "-GPSLatitude=48.8584",
+        "-GPSLatitudeRef=N",
+        "-GPSLongitude=2.2945",
+        "-GPSLongitudeRef=E",
+        "-GPSHPositioningError=21.8535",
+    )
+    finding = next(f for f in run(target).findings if f.id == "privacy.gps_location")
+    detail = finding.detail(Translator("en"))
+    assert "21.8535" not in detail
+    assert "22 metres" in detail

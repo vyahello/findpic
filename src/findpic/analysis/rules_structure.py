@@ -116,6 +116,29 @@ BENIGN_WARNING = re.compile(
 )
 
 
+@rule("extraction_incomplete", Category.STRUCTURAL, order=0)
+def extraction_incomplete(context: Context) -> Iterable[Finding]:
+    """exiftool stopped early, so every "nothing found" below is unproven.
+
+    CRITICAL, and it suppresses the good verdicts in ``verdict.py``. A location
+    tool that answers "no location" when it means "I did not finish looking" has
+    made the worst mistake available to it, and it cannot make that mistake
+    quietly.
+    """
+    if context.meta.incomplete is None:
+        return
+    code, got, expected = context.meta.incomplete
+    yield Finding(
+        id="structural.extraction_incomplete",
+        category=Category.STRUCTURAL,
+        severity=Severity.CRITICAL,
+        confidence=Confidence.HIGH,
+        params={"code": code, "got": got, "expected": expected},
+        evidence={"exit_status": code, "blocks_read": got, "blocks_expected": expected},
+        weight=30,
+    )
+
+
 @rule("trailing_data", Category.STRUCTURAL, order=1)
 def trailing_data(context: Context) -> Iterable[Finding]:
     """Bytes living past the point where the image structure ends."""

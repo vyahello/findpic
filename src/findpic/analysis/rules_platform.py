@@ -9,6 +9,7 @@ low-confidence and carry no verdict weight — they are context, not accusations
 from __future__ import annotations
 
 from collections.abc import Iterable
+from pathlib import Path
 
 from ..models import Category, Confidence, Finding, Severity
 from ..recover import timestamp_from_filename
@@ -48,7 +49,14 @@ def filename_origin(context: Context) -> Iterable[Finding]:
         category=Category.PLATFORM,
         severity=Severity.INFO,
         confidence=Confidence.LOW,
-        params={"source_keys": [matched], "note_keys": [matched]},
+        params={
+            "source_keys": [matched],
+            "note_keys": [matched],
+            # So a note can name this photograph. Without it "note.apple" told
+            # every reader about IMG_2781 — a file from the corpus these strings
+            # were written against, and one the reader has never seen.
+            "stem": Path(context.file.name).stem,
+        },
         evidence={"filename": context.file.name},
     )
 

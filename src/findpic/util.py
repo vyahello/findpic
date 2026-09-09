@@ -19,6 +19,21 @@ _EXIF_DATETIME = re.compile(
 _OFFSET = re.compile(r"^(?P<sign>[+\-])(?P<h>\d{2}):?(?P<m>\d{2})$")
 
 
+def measured(value: float | None) -> str | None:
+    """Round a physical measurement to the precision it was actually measured to.
+
+    A GPS error radius arrives as ``21.8535`` and was printed into prose reading
+    "accurate to about 21.8535 metres" — "about" and four decimals in the same
+    sentence, a tenth of a millimetre of certainty about an uncertainty. One
+    decimal is already generous below ten metres; above it, none is.
+    """
+    if value is None:
+        return None
+    if abs(value) >= 10 or float(value).is_integer():
+        return f"{value:.0f}"
+    return f"{value:.1f}"
+
+
 def human_bytes(size: float) -> str:
     """Render a byte count the way a person would say it."""
     if size < 1024:
@@ -113,12 +128,14 @@ def same_moment(left: dt.datetime | None, right: dt.datetime | None) -> bool | N
 def to_dms(value: float, is_latitude: bool) -> str:
     """Decimal degrees to degrees/minutes/seconds with a hemisphere letter."""
     hemisphere = ("N" if value >= 0 else "S") if is_latitude else ("E" if value >= 0 else "W")
-    magnitude = abs(value)
-    degrees = int(magnitude)
-    minutes_full = (magnitude - degrees) * 60
-    minutes = int(minutes_full)
-    seconds = (minutes_full - minutes) * 60
-    return f"{degrees}°{minutes:02d}'{seconds:05.2f}\"{hemisphere}"
+    # Rounded to the precision that is about to be printed, *then* split.
+    # Truncating degrees and minutes while rounding seconds separately never
+    # propagated the carry, so 139.7 came out as 139°41'60.00"E — sixty seconds
+    # is not a notation, and this is a tool people quote coordinates out of.
+    total = round(abs(value) * 3600, 2)
+    degrees, rest = divmod(total, 3600)
+    minutes, seconds = divmod(rest, 60)
+    return f"{int(degrees)}°{int(minutes):02d}'{seconds:05.2f}\"{hemisphere}"
 
 
 def coords_to_dms(latitude: float, longitude: float) -> str:

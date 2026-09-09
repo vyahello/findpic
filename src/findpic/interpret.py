@@ -16,6 +16,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .tables import GPS_SPEED_REF, SPEED_TO_KMH
+from .util import measured
+
 
 @dataclass(frozen=True)
 class Note:
@@ -38,9 +41,7 @@ def describe_accuracy(metres: float | None) -> Note | None:
     """
     if metres is None:
         return None
-    # A whole number of metres is written without a decimal: "±6 m", not "±6.0 m".
-    whole = metres >= 10 or float(metres).is_integer()
-    value = f"{metres:.0f}" if whole else f"{metres:.1f}"
+    value = measured(metres)
     if metres <= 10:
         band = "exact"
     elif metres <= 50:
@@ -52,10 +53,16 @@ def describe_accuracy(metres: float | None) -> Note | None:
     return Note(f"detail.accuracy.{band}", {"value": value})
 
 
-def describe_direction(degrees: float | None, magnetic: bool = False) -> Note | None:
+def describe_direction(degrees: float | None, magnetic: bool | None = False) -> Note | None:
     """Which way the camera was pointing, in words rather than degrees.
 
     "Azimuth 291°" is jargon. "The camera was pointing west-north-west" is not.
+
+    ``magnetic`` has three states because Exif has no default for
+    ``GPSImgDirectionRef``. Collapsing *absent* into *true north* asserted
+    something the file never said, and magnetic declination runs to eight
+    degrees in Ukraine — enough to point at the wrong building, with nothing on
+    screen to tell the reader the reference was a guess.
     """
     if degrees is None:
         return None
@@ -78,10 +85,10 @@ def describe_direction(degrees: float | None, magnetic: bool = False) -> Note | 
         "nnw",
     )
     index = int((degrees % 360) / 22.5 + 0.5) % 16
-    return Note(
-        "detail.direction.magnetic" if magnetic else "detail.direction",
-        {"point_key": f"compass.full.{points[index]}", "degrees": f"{degrees:.0f}"},
+    key = {True: "detail.direction.magnetic", False: "detail.direction"}.get(
+        magnetic, "detail.direction.unreferenced"
     )
+    return Note(key, {"point_key": f"compass.full.{points[index]}", "degrees": f"{degrees:.0f}"})
 
 
 def describe_movement(speed: float | None, unit: str | None) -> Note | None:
@@ -93,14 +100,15 @@ def describe_movement(speed: float | None, unit: str | None) -> Note | None:
     """
     if speed is None:
         return None
-    kmh = speed
-    reference = (unit or "").lower()
-    if reference.startswith("m") and "mph" in reference:
-        kmh = speed * 1.609
-    elif reference.startswith("k"):
-        kmh = speed
-    elif reference.startswith("n"):
-        kmh = speed * 1.852
+    # An exact lookup, never a prefix test: "knots" starts with a k, so the
+    # old k-before-n ordering converted it as km/h and understated a boat by
+    # 85%. And an unrecognised or missing reference returns nothing rather
+    # than quietly assuming km/h — a speed whose unit is unknown is not a
+    # speed anybody should be shown.
+    unit_key = GPS_SPEED_REF.get((unit or "").strip().lower())
+    if unit_key is None:
+        return None
+    kmh = speed * SPEED_TO_KMH[unit_key]
 
     if kmh < 1.5:
         return Note("detail.movement.still", {})
@@ -160,6 +168,25 @@ def describe_shutter(seconds: float | None, stabilised: bool = False) -> Note | 
     if seconds <= 1 / 1000:
         return Note("detail.shutter.freeze", {"value": _shutter_text(seconds)})
     return None
+
+
+def shutter_seconds(raw: object) -> float | None:
+    """Exposure time as a float, from whatever exiftool wrote.
+
+    Lives here rather than in a renderer because both of them need it: the tag
+    is the string "1/4" and ``describe_shutter`` takes seconds, so the parser
+    would otherwise exist twice and drift.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    try:
+        if "/" in text:
+            numerator, denominator = text.split("/", 1)
+            return float(numerator) / float(denominator)
+        return float(text)
+    except (ValueError, ZeroDivisionError):
+        return None
 
 
 def _shutter_text(seconds: float) -> str:

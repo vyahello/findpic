@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .util import truncate
+
 DEFAULT_TIMEOUT = 60
 DEFAULT_MAX_BYTES = 512 * 1024 * 1024  # 512 MiB
 
@@ -92,6 +94,10 @@ class Metadata:
     validation: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    #: ``(exit code, blocks parsed, blocks asked for)`` when exiftool did not
+    #: finish. ``None`` on a complete read. Rules must be able to tell "this
+    #: file has no GPS" apart from "we stopped looking before the GPS block".
+    incomplete: tuple[int, int, int] | None = None
     _index: dict[str, list[str]] = field(default_factory=dict, repr=False)
     _lowered: dict[str, str] = field(default_factory=dict, repr=False)
 
@@ -325,10 +331,19 @@ class ExifTool:
         and (optionally) exiftool's own structural validation.
         """
         target = self._checked_path(path)
-        argv = self._build_argv(target, validate=validate)
-        stdout, stderr, _ = self._run(argv)
+        argv, expected = self._build_argv(target, validate=validate)
+        stdout, stderr, code = self._run(argv)
 
         documents = list(_iter_json_documents(stdout))
+        if not documents:
+            # Previously this fell through to an empty Metadata, and the
+            # empty-metadata rules read it as a photograph with nothing in it.
+            # Nothing parsed means nothing is known, which is not a report.
+            raise ExifToolError(
+                f"exiftool returned no readable output for {target} "
+                f"(exit status {code})"
+                + (f": {truncate(stderr.strip(), 200)}" if stderr.strip() else "")
+            )
         human = self._first_record(documents, 0)
         numeric = self._first_record(documents, 1)
         validation = self._first_record(documents, 2) if validate else {}
@@ -350,6 +365,11 @@ class ExifTool:
         metadata.errors = self._collect_errors(human, stderr)
         if not human and not metadata.errors:
             metadata.errors.append("exiftool returned no metadata for this file.")
+        # A non-zero status, or fewer blocks than were asked for, means whole
+        # passes are missing from everything below. Recorded rather than raised:
+        # what did arrive is still worth showing, as long as the report says so.
+        if code != 0 or len(documents) < expected:
+            metadata.incomplete = (code, len(documents), expected)
         return metadata
 
     def extract_binary(self, path: str | os.PathLike[str], tag: str) -> bytes | None:
@@ -386,6 +406,17 @@ class ExifTool:
             )
         if size == 0:
             raise UnreadableFile(f"file is empty: {target}")
+        # Everything above this line asks the *directory* about the file. None of
+        # it opens it, so a mode-000 photograph passed every check, exiftool
+        # returned nothing, and the empty-metadata rules graded it
+        # "Privacy: CLEAN — this file carries almost no metadata, so there is
+        # nothing to leak". A verdict must never be printed about bytes that
+        # were never read; one byte is enough to find that out.
+        try:
+            with open(target, "rb") as handle:
+                handle.read(1)
+        except OSError as exc:
+            raise UnreadableFile(f"cannot read file: {target}") from exc
         return target
 
     #: Tags exiftool computes only when asked by name. They cannot be mixed into
@@ -395,14 +426,20 @@ class ExifTool:
     #: survives a full metadata rewrite.
     ON_DEMAND_TAGS = ("-JPEGDigest", "-JPEGQualityEstimate")
 
-    def _build_argv(self, target: Path, validate: bool) -> list[str]:
+    def _build_argv(self, target: Path, validate: bool) -> tuple[list[str], int]:
+        """The argument vector, and the number of result blocks it asks for.
+
+        Returned together rather than letting the caller count ``-execute``
+        markers: the two must agree, and one of them being derived from the
+        other is what keeps them agreeing when a pass is added.
+        """
         name = str(target)
         argv = [self.binary, *self.BASE_ARGS, "-struct", name, "-execute"]
         argv += [*self.BASE_ARGS, "-n", name, "-execute"]
         if validate:
             argv += ["-json", "-G1", "-validate", "-warning", "-a", name, "-execute"]
         argv += ["-json", "-G1", *self.ON_DEMAND_TAGS, name, "-execute"]
-        return argv
+        return argv, argv.count("-execute")
 
     def _run(self, argv: list[str]) -> tuple[str, str, int]:
         try:

@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from ..models import Category, Confidence, Finding, Severity
-from ..util import compare_geometry, truncate
+from ..util import compare_geometry, measured, truncate
 from .context import Context
 from .registry import rule
 
@@ -109,7 +109,7 @@ def gps_location(context: Context) -> Iterable[Finding]:
             # An optional trailing sentence. An empty list resolves to an empty
             # string, so the sentence disappears when there is no accuracy value.
             "accuracy_pairs": (
-                [("metres", f"{location.accuracy_m:g}")] if location.accuracy_m else []
+                [("metres", measured(location.accuracy_m))] if location.accuracy_m else []
             ),
         },
         evidence={
@@ -128,7 +128,12 @@ def gps_location(context: Context) -> Iterable[Finding]:
     if location.direction_deg is not None:
         extras.append(("bearing", f"{location.direction_deg:.0f}"))
     if location.speed:
-        extras.append(("speed", f"{location.speed:g} {location.speed_ref or ''}".strip()))
+        # A drift reading of 0.0446 rounds to nothing, and "speed 0.0 km/h" is
+        # not a disclosure about where anybody went — it is the receiver noise
+        # of a stationary phone. Say nothing rather than something empty.
+        reading = measured(location.speed)
+        if reading and float(reading):
+            extras.append(("speed", f"{reading} {location.speed_ref or ''}".strip()))
     if not extras:
         return
 

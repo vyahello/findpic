@@ -116,12 +116,21 @@ class Finding:
         """
         resolved: dict[str, Any] = {}
         separator = translator.get("ui.list.separator")
+        # A keyed sentence may want a value from the finding it belongs to:
+        # "note.apple" has to name *this* file, not the one it was written
+        # against. Extra keywords are ignored by str.format, so every other
+        # entry is unaffected.
+        scalars = {
+            name: value
+            for name, value in self.params.items()
+            if isinstance(value, (str, int, float))
+        }
 
         for name, value in self.params.items():
             if name.endswith("_keys") and isinstance(value, (list, tuple)):
                 prefix = name[: -len("_keys")]
                 resolved[prefix] = separator.join(
-                    translator.get(f"{prefix}.{item}") for item in value
+                    translator.get(f"{prefix}.{item}", **scalars) for item in value
                 )
             elif name.endswith("_pairs") and isinstance(value, (list, tuple)):
                 prefix = name[: -len("_pairs")]

@@ -188,3 +188,53 @@ def test_summary_legend_goes_to_stderr(
     assert "originality, privacy, structure" in captured.err
     assert "originality, privacy, structure" not in captured.out
     assert captured.out.count("\n") == 2
+
+
+def test_an_unreadable_file_exits_2_and_prints_no_verdict(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The one thing worse than no answer is a reassuring wrong one."""
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root can read a mode-000 file")
+    target = tmp_path / "locked.jpg"
+    target.write_bytes(camera_jpeg.read_bytes())
+    target.chmod(0o000)
+    try:
+        code = main([str(target), *OFFLINE])
+    finally:
+        target.chmod(0o644)
+    captured = capsys.readouterr()
+    assert code == EXIT_ERROR
+    assert "CLEAN" not in captured.out
+    assert target.name in captured.err
+
+
+def test_a_missing_direction_ref_is_not_reported_as_true_north(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exif has no default for GPSImgDirectionRef; declination reaches +8°."""
+    import subprocess
+
+    target = tmp_path / "bearing.jpg"
+    target.write_bytes(camera_jpeg.read_bytes())
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-q",
+            "-GPSLatitude=48.8584",
+            "-GPSLatitudeRef=N",
+            "-GPSLongitude=2.2945",
+            "-GPSLongitudeRef=E",
+            "-GPSImgDirection=349",
+            str(target),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    main([str(target), *OFFLINE])
+    output = " ".join(capsys.readouterr().out.split())
+    assert "349" in output
+    assert "true or magnetic north" in output
