@@ -196,6 +196,137 @@ def truncated_jpeg(fixture_dir: Path, camera_jpeg: Path) -> Path:
 
 
 @pytest.fixture(scope="session")
+def identity_jpeg(fixture_dir: Path) -> Path:
+    """Every tag IDENTITY_TAGS scans, including the email and the phone number.
+
+    Written where exiftool will actually take each one — the group a value ends
+    up in is the whole point of this fixture, because findpic finds tags by bare
+    name across every group and its fixes did not.
+    """
+    path = fixture_dir / "identity.jpg"
+    _magick("-size", "64x48", "xc:slategray", str(path))
+    _exiftool(
+        "-Artist=Jane Q. Photographer",
+        "-Copyright=(c) Jane Q. Photographer",
+        "-OwnerName=Jane Q. Photographer",
+        "-XMP-dc:Rights=All rights reserved",
+        "-IPTC:By-line=Jane Q. Photographer",
+        "-IPTC:By-lineTitle=Staff",
+        "-IPTC:Credit=The Daily Example",
+        "-IPTC:Source=Example Wire",
+        "-IPTC:Contact=jane@example.com",
+        "-XMP-iptcCore:CreatorWorkEmail=jane@example.com",
+        "-XMP-iptcCore:CreatorWorkTelephone=+44 20 7946 0000",
+        "-XMP-iptcCore:CreatorWorkURL=https://example.com",
+        "-XMP-photoshop:AuthorsPosition=Chief Photographer",
+        str(path),
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
+def text_jpeg(fixture_dir: Path) -> Path:
+    """Every free-text field, including the six the old fix left behind."""
+    path = fixture_dir / "text.jpg"
+    _magick("-size", "64x48", "xc:tan", str(path))
+    _exiftool(
+        "-UserComment=a user comment",
+        "-ImageDescription=an image description",
+        "-XMP-dc:Description=an XMP description",
+        "-XMP-dc:Title=an XMP title",
+        "-IPTC:Caption-Abstract=an IPTC caption",
+        "-IPTC:Headline=an IPTC headline",
+        "-IPTC:ObjectName=an IPTC object name",
+        "-IPTC:SpecialInstructions=do not publish before Friday",
+        "-Comment=a JPEG comment",
+        str(path),
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
+def ids_jpeg(fixture_dir: Path) -> Path:
+    """Device identifiers, including the xmpMM trio the old fix could not reach.
+
+    No MakerNotes: exiftool will not create a vendor block from scratch, so the
+    Apple identifiers can only be exercised against a real photograph.
+    """
+    path = fixture_dir / "ids.jpg"
+    _magick("-size", "64x48", "xc:plum", str(path))
+    _exiftool(
+        "-SerialNumber=SN-12345678",
+        "-LensSerialNumber=LSN-87654321",
+        "-ImageUniqueID=0123456789abcdef0123456789abcdef",
+        "-XMP-xmpMM:DocumentID=xmp.did:11111111-1111-1111-1111-111111111111",
+        "-XMP-xmpMM:InstanceID=xmp.iid:22222222-2222-2222-2222-222222222222",
+        "-XMP-xmpMM:OriginalDocumentID=xmp.did:33333333-3333-3333-3333-333333333333",
+        str(path),
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
+def named_people_jpeg(fixture_dir: Path) -> Path:
+    """A human name attached to the picture, in the two places findpic reads."""
+    path = fixture_dir / "people.jpg"
+    _magick("-size", "64x48", "xc:khaki", str(path))
+    _exiftool(
+        "-XMP-mwg-rs:RegionType=Face",
+        "-XMP-mwg-rs:RegionName=Alice Example",
+        "-XMP-mwg-rs:RegionAreaX=0.5",
+        "-XMP-mwg-rs:RegionAreaY=0.5",
+        "-XMP-mwg-rs:RegionAreaW=0.2",
+        "-XMP-mwg-rs:RegionAreaH=0.2",
+        "-XMP-iptcExt:PersonInImage=Bob Example",
+        str(path),
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
+def shadowed_jpeg(fixture_dir: Path) -> Path:
+    """Identity and caption data in groups the scan list does not name.
+
+    findpic asks for ``IPTC:Source`` and Metadata answers with
+    ``XMP-dc:Source``, because a group-qualified miss falls back to a bare-name
+    match. Photoshop and Lightroom write these routinely, and every per-group
+    fix ran as a no-op on them — exit 0, "1 image files copied", finding intact.
+    """
+    path = fixture_dir / "shadowed.jpg"
+    _magick("-size", "64x48", "xc:cadetblue", str(path))
+    _exiftool(
+        "-XMP-dc:Source=a dc source",
+        "-XMP-photoshop:Credit=a photoshop credit",
+        "-XMP-xmp:Description=an xmp description",
+        "-XMP-iptcExt:Headline=an iptcExt headline",
+        str(path),
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
+def gps_png(fixture_dir: Path) -> Path:
+    """Coordinates in a container that is not a JPEG.
+
+    PNG rather than HEIC on purpose. Every printed fix hard-coded ``.jpg`` as
+    its output and died with "Can't create JPEG files from other types" on
+    anything else — and PNG reproduces that error exactly while needing nothing
+    beyond the ImageMagick every other fixture here already requires. A HEIC
+    fixture would need libheif plus an x265 plugin, which CI does not have.
+    """
+    path = fixture_dir / "gps.png"
+    _magick("-size", "64x48", "xc:seagreen", str(path))
+    _exiftool(
+        "-GPSLatitude=48.8584",
+        "-GPSLatitudeRef=N",
+        "-GPSLongitude=2.2945",
+        "-GPSLongitudeRef=E",
+        str(path),
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
 def real_samples() -> list[Path]:
     """The user's own photos, when they are present."""
     if not SAMPLES.is_dir():

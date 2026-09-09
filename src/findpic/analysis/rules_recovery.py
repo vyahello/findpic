@@ -26,12 +26,15 @@ here is attribution, and the catalogue text says so in as many words.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Iterable
+from pathlib import Path
 
 from ..models import Category, Confidence, Finding, Severity
 from ..recover import PRECISION_SECOND, timestamp_from_filename
 from ..tables import match_filename
 from .context import Context
+from .fixcmd import command
 from .registry import rule
 
 #: How far two aspect ratios may drift before we call them different shapes.
@@ -242,9 +245,28 @@ def preview_shape_differs(context: Context) -> Iterable[Finding]:
             "image_aspect": round(main_aspect, 4),
             "preview_aspect": round(preview_aspect, 4),
         },
-        remediation="exiftool -b -ThumbnailImage photo.jpg > preview.jpg",
+        # Not a bare argv — it needs the shell's redirect — so it is built here
+        # rather than through fixcmd, and marked "inspect" so the executing test
+        # knows to skip it and the label does not read "how to remove".
+        remediation=(
+            f"exiftool -b -ThumbnailImage {shlex.quote(context.file.path)} > "
+            f"{shlex.quote(preview_name(context))}"
+        ),
+        remediation_kind="inspect",
         weight=12,
     )
+
+
+def preview_name(context: Context) -> str:
+    """Where to write the extracted preview: beside the picture, named for it.
+
+    The command hard-coded ``> preview.jpg``. Since it also hard-coded
+    ``photo.jpg`` as its input, pasting it almost always hit "File not found" —
+    and the shell truncates the redirect target before exiftool ever runs, so
+    an existing preview.jpg was silently emptied for nothing.
+    """
+    source = Path(context.file.path)
+    return str(source.with_name(f"{source.stem}.preview.jpg"))
 
 
 @rule("filename_timestamp", Category.PLATFORM, order=17)
@@ -277,9 +299,21 @@ def filename_timestamp(context: Context) -> Iterable[Finding]:
         evidence={"filename": context.file.name, "precision": found.precision},
         # -o writes a new file. Restoring a date is a judgement call, and a
         # judgement call should not overwrite the only copy of the evidence.
-        remediation=(
-            f'exiftool -AllDates="{found.exif_value}" -o restored.jpg "{context.file.name}"'
+        #
+        # Built through fixcmd because this is the one remediation that
+        # interpolates a value, and it used to do so with an f-string and double
+        # quotes: a file named `IMG_20230813_145435"; id #.jpg` printed a line
+        # that ran `id` when pasted, and $(…), backticks and $HOME all expanded
+        # inside those quotes. It also interpolated the basename rather than the
+        # path, so the command failed for any file outside the current directory.
+        remediation=command(
+            context.file.path,
+            context.file.file_type_extension,
+            (f"-AllDates={found.exif_value}",),
+            marker="dated",
         ),
+        remediation_args=(f"-AllDates={found.exif_value}",),
+        remediation_kind="restore",
     )
 
 

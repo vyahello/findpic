@@ -18,7 +18,7 @@ from .geocode import Geocoder
 from .i18n import LANGUAGE_NAMES, Translator, available_languages, detect_language
 from .models import Report, Severity, VerdictLevel
 from .render.terminal import LEVEL_GLYPH, LEVEL_STYLE, render_report
-from .restore import RestoreError, backup, restore
+from .restore import RestoreError, backup, clean, restore
 
 IMAGE_SUFFIXES = {
     ".jpg",
@@ -68,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  findpic photo.jpg --json           machine-readable output\n"
             "  findpic photo.jpg --no-geocode     never touch the network\n"
             "\n"
+            "  findpic photo.jpg --clean         write photo.clean.jpg with no metadata\n"
+            "\n"
             "Metadata is only restorable if a copy of it exists. Make one first:\n"
             "  findpic photo.jpg --backup               write photo.jpg.mie beside it\n"
             "  findpic stripped.jpg --restore photo.jpg.mie\n"
@@ -88,12 +90,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     metadata = parser.add_argument_group(
         "metadata",
-        "Write operations. Both leave every input file exactly as it was.",
+        "Write operations. All three leave every input file exactly as it was.",
     )
     metadata.add_argument(
         "--backup",
         action="store_true",
         help="write a sidecar holding every tag, so it can be restored later",
+    )
+    metadata.add_argument(
+        "--clean",
+        action="store_true",
+        help="write a metadata-free copy beside the original (photo.heic -> photo.clean.heic)",
+    )
+    metadata.add_argument(
+        "--out",
+        metavar="PATH",
+        type=Path,
+        default=None,
+        help="with --clean or --restore: the file to write, or a directory to write into",
     )
     metadata.add_argument(
         "--restore",
@@ -188,6 +202,21 @@ def worst_level(report: Report) -> VerdictLevel:
     return max(levels, key=lambda level: level.rank) if levels else VerdictLevel.UNKNOWN
 
 
+def _destination(out: Path | None, source: Path, marker: str) -> Path | None:
+    """Where --out sends this file, or None to keep the default name.
+
+    A directory takes every target, each keeping its own name, so a whole folder
+    can be cleaned into one place without the second file colliding with the
+    first. A path that is not a directory is one file, and the caller has
+    already refused that when there is more than one target.
+    """
+    if out is None:
+        return None
+    if out.is_dir():
+        return out / f"{source.stem}{marker}{source.suffix}"
+    return out
+
+
 def run_metadata_write(
     args: argparse.Namespace,
     targets: list[Path],
@@ -203,9 +232,23 @@ def run_metadata_write(
     two exit codes would make a failed restore look like a clean photo.
     """
     failures = 0
+    cleaned: list[Path] = []
     for path in targets:
         try:
-            if args.backup:
+            if args.clean:
+                result = clean(
+                    path, destination=_destination(args.out, path, ".clean"), exiftool=exiftool
+                )
+                console.print(
+                    translator.get(
+                        "cli.clean.written",
+                        target=result.written.name,
+                        removed=result.removed,
+                        before=result.tags_before,
+                    )
+                )
+                cleaned.append(path)
+            elif args.backup:
                 written = backup(path, exiftool=exiftool)
                 console.print(
                     translator.get(
@@ -215,7 +258,13 @@ def run_metadata_write(
                     )
                 )
             else:
-                result = restore(args.restore, path, exiftool=exiftool, force=args.force)
+                result = restore(
+                    args.restore,
+                    path,
+                    destination=_destination(args.out, path, ".restored"),
+                    exiftool=exiftool,
+                    force=args.force,
+                )
                 key = "cli.restore.written" if result.recovered else "cli.restore.nothing"
                 console.print(
                     translator.get(
@@ -228,6 +277,10 @@ def run_metadata_write(
         except (RestoreError, ExifToolError, OSError) as exc:
             errors.print(f"[red]{path.name}:[/] {exc}")
             failures += 1
+    # Once, at the end. Said after every file it became the thing the reader
+    # scrolls past, which is the opposite of what it is for.
+    if cleaned:
+        console.print(translator.get("cli.clean.keep_backup", file=cleaned[0].name))
     return EXIT_ERROR if failures else EXIT_OK
 
 
@@ -239,8 +292,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return EXIT_ERROR
 
-    if args.backup and args.restore:
-        print("--backup and --restore do different things; run them one at a time.")
+    if sum(map(bool, (args.backup, args.restore, args.clean))) > 1:
+        print("--backup, --restore and --clean do different things; run them one at a time.")
         return EXIT_ERROR
 
     no_color = args.no_color or bool(os.environ.get("NO_COLOR"))
@@ -275,7 +328,13 @@ def main(argv: list[str] | None = None) -> int:
         errors.print(f"[yellow]{translator.get('cli.error.no_images')}[/]")
         return EXIT_ERROR
 
-    if args.backup or args.restore:
+    if args.backup or args.restore or args.clean:
+        if args.out and len(targets) > 1 and not args.out.is_dir():
+            errors.print(
+                f"[red]--out {args.out} names one file but {len(targets)} were given; "
+                "point it at a directory instead.[/]"
+            )
+            return EXIT_ERROR
         return run_metadata_write(args, targets, console, errors, exiftool, translator)
 
     reports: list[Report] = []

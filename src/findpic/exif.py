@@ -190,6 +190,18 @@ class Metadata:
         dict at the user. So we walk every group carrying the name and return the
         first one that is actually a scalar.
         """
+        located = self.located(*names)
+        return located[1] if located else default
+
+    def located(self, *names: str) -> tuple[str, str] | None:
+        """Like :meth:`str`, but says which key the value actually came from.
+
+        A caller asking for ``IPTC:Source`` can be answered out of
+        ``XMP-dc:Source``, because a group-qualified miss falls back to a bare
+        name. Reporting the name that was *asked for* sent readers to delete a
+        tag the file does not have — and the value they wanted to remove stayed
+        exactly where it was.
+        """
         for name in names:
             for key in self._candidates(name):
                 value = self.human.get(key, self.numeric.get(key))
@@ -197,8 +209,8 @@ class Metadata:
                     continue
                 text = value.strip() if isinstance(value, str) else str(value)
                 if text:
-                    return text
-        return default
+                    return key, text
+        return None
 
     def _candidates(self, name: str) -> list[str]:
         """Every key that could satisfy ``name``, best match first."""

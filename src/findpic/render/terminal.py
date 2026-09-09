@@ -15,12 +15,15 @@ Layout principles, since "readable" was the whole point of the tool:
 
 from __future__ import annotations
 
+import shlex
+
 from rich.console import Console, Group
 from rich.padding import Padding
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from ..analysis import fixcmd
 from ..i18n import Translator
 from ..interpret import (
     Note,
@@ -489,7 +492,53 @@ def render_integrity(console: Console, report: Report) -> None:
     _section(console, t.get("ui.section.file"), table)
 
 
-def _finding_table(entries: list[Finding], t: Translator) -> Table:
+#: What the command under a finding actually does. Three of the thirteen do not
+#: remove anything — one writes a date back in, one extracts a preview — and all
+#: three were printed under a label that reads, in Ukrainian, "how to remove".
+FIX_LABEL = {
+    "remove": "ui.value.fix",
+    "inspect": "ui.value.fix_inspect",
+    "restore": "ui.value.fix_restore",
+}
+
+
+def _combined_args(entries: list[Finding]) -> tuple[tuple[str, ...], list[str]]:
+    """The union of every removal flag in one category, and what it costs.
+
+    Printed as a single command because the individual ones cannot be run in
+    sequence: each reads the original and each writes the same output name, so
+    the first succeeded, the next five refused to start, and the reader was left
+    holding a file findpic said it had cleaned that still carried five leaks.
+    """
+    args: list[str] = []
+    costs: list[str] = []
+    for finding in entries:
+        if finding.remediation_kind != "remove":
+            continue
+        args.extend(finding.remediation_args)
+        if finding.remediation_cost_key:
+            costs.append(finding.remediation_cost_key)
+    return tuple(dict.fromkeys(args)), list(dict.fromkeys(costs))
+
+
+def _fix_rows(body: Text, finding: Finding, t: Translator) -> None:
+    """The command, and — where it takes more than it was asked to — the cost."""
+    if not finding.remediation:
+        return
+    body.append("\n")
+    body.append(t.get(FIX_LABEL.get(finding.remediation_kind, "ui.value.fix")), style="green bold")
+    # safe(): the command carries the file's own name, and a filename can hold
+    # ANSI escapes that repaint the terminal.
+    printed = safe(finding.remediation)
+    printed.stylize("green")
+    body.append_text(printed)
+    if finding.remediation_cost_key:
+        body.append("\n")
+        body.append(t.get("ui.value.fix_cost"), style="yellow")
+        body.append(t.get(f"ui.value.fix_cost.{finding.remediation_cost_key}"), style="grey54")
+
+
+def _finding_table(entries: list[Finding], t: Translator, report: Report | None = None) -> Table:
     """Render findings in a glyph/body grid so wrapped text keeps its indent."""
     table = Table(box=None, show_header=False, pad_edge=False, padding=(0, 0, 1, 0))
     table.add_column("glyph", width=3, no_wrap=True, vertical="top")
@@ -510,10 +559,7 @@ def _finding_table(entries: list[Finding], t: Translator) -> Table:
         if detail:
             body.append("\n")
             body.append(detail, style="grey62")
-        if finding.remediation:
-            body.append("\n")
-            body.append(t.get("ui.value.fix"), style="green bold")
-            body.append(finding.remediation, style="green")
+        _fix_rows(body, finding, t)
         table.add_row(
             Text(
                 f" {SEVERITY_GLYPH[finding.severity]}",
@@ -521,6 +567,27 @@ def _finding_table(entries: list[Finding], t: Translator) -> Table:
             ),
             body,
         )
+
+    # One line that does the whole category, and the pointer to --backup beneath
+    # it. This is the line most readers will paste, and it is the last moment
+    # before the metadata is gone — which is exactly where the epilog's advice to
+    # make a copy first was not being said.
+    args, costs = _combined_args(entries)
+    if report is not None and len(args) > 1:
+        combined = Text()
+        combined.append(t.get("ui.value.fix_all"), style="green bold")
+        printed = safe(fixcmd.command(report.file.path, report.file.file_type_extension, args))
+        printed.stylize("green")
+        combined.append_text(printed)
+        for cost in costs:
+            combined.append("\n")
+            combined.append(t.get("ui.value.fix_cost"), style="yellow")
+            combined.append(t.get(f"ui.value.fix_cost.{cost}"), style="grey54")
+        combined.append("\n")
+        hint = safe(t.get("ui.hint.backup_first", file=shlex.quote(report.file.path)))
+        hint.stylize("grey42")
+        combined.append_text(hint)
+        table.add_row(Text(""), combined)
     return table
 
 
@@ -546,7 +613,12 @@ def render_findings(console: Console, report: Report, show_info: bool = True) ->
         )
         # Rich drops the last row's bottom padding, so separate the category
         # blocks explicitly rather than letting them run together.
-        console.print(Padding(_finding_table(entries, t), (0, 0, 1, 1)))
+        console.print(
+            Padding(
+                _finding_table(entries, t, report if category is Category.PRIVACY else None),
+                (0, 0, 1, 1),
+            )
+        )
 
 
 def render_notes(console: Console, report: Report) -> None:

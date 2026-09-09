@@ -15,7 +15,7 @@ import pytest
 
 from findpic.cli import EXIT_ERROR, EXIT_OK, main
 from findpic.exif import ExifTool
-from findpic.restore import RestoreError, backup, restore, sidecar_path
+from findpic.restore import RestoreError, backup, clean, restore, sidecar_path
 
 pytestmark = pytest.mark.skipif(not ExifTool.available(), reason="exiftool is not installed")
 
@@ -243,3 +243,146 @@ def test_the_donor_marker_cannot_be_overwritten_by_the_donor(
     )
     result = restore(donor, stripped)
     assert "findpic" in (ExifTool().read(result.written).str("HistorySoftwareAgent") or "")
+
+
+# ------------------------------------------------------------------- --clean
+
+
+def test_clean_writes_beside_the_original_keeping_the_suffix(tmp_path: Path, gps_png: Path) -> None:
+    """A PNG must not come back as a JPEG.
+
+    exiftool refuses to change a file's type on the way out, so every command
+    that hard-coded `.jpg` died on anything else — and a HEIC that returned as a
+    JPEG would not be the same picture anyway.
+    """
+    source = tmp_path / "shot.png"
+    shutil.copy(gps_png, source)
+    result = clean(source)
+    assert result.written == tmp_path / "shot.clean.png"
+    assert result.written.exists()
+    assert result.removed > 0
+
+
+def test_clean_never_touches_the_input(tmp_path: Path, gps_jpeg: Path) -> None:
+    source = tmp_path / "photo.jpg"
+    shutil.copy(gps_jpeg, source)
+    before = hashlib.sha256(source.read_bytes()).hexdigest()
+    clean(source)
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == before
+
+
+def test_clean_refuses_to_clobber_an_existing_target(tmp_path: Path, gps_jpeg: Path) -> None:
+    source = tmp_path / "photo.jpg"
+    shutil.copy(gps_jpeg, source)
+    clean(source)
+    with pytest.raises(RestoreError, match="already exists"):
+        clean(source)
+
+
+def test_clean_keeps_orientation_and_icc(tmp_path: Path, camera_jpeg: Path) -> None:
+    """The two things that are not metadata in any sense a reader cares about:
+    which way up the picture goes, and what its colours mean."""
+    source = tmp_path / "photo.jpg"
+    shutil.copy(camera_jpeg, source)
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-Orientation=6", "-n", str(source)],
+        check=True,
+        capture_output=True,
+    )
+    result = clean(source)
+    kept = subprocess.run(
+        ["exiftool", "-s3", "-Orientation", "-n", str(result.written)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert kept.stdout.strip() == "6"
+
+
+def test_clean_refuses_to_report_success_when_the_camera_survives(tmp_path: Path) -> None:
+    """exiftool cannot delete IFD0 from a TIFF, and findpic accepts .tif and the
+    whole TIFF-based raw family. It prints "[minor] Can't delete IFD0", exits 0,
+    and leaves Make and Model exactly where they were."""
+    source = tmp_path / "raw.tif"
+    subprocess.run(["magick", "-size", "64x48", "xc:steelblue", str(source)], check=True)
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-Make=TestCorp", "-Model=TestCam", str(source)],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(RestoreError, match="survived"):
+        clean(source)
+
+
+def test_clean_and_backup_together_are_refused(
+    tmp_path: Path, gps_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "photo.jpg"
+    shutil.copy(gps_jpeg, source)
+    assert main([str(source), "--clean", "--backup"]) == EXIT_ERROR
+    assert not (tmp_path / "photo.clean.jpg").exists()
+
+
+def test_clean_out_into_a_directory_keeps_each_name(
+    tmp_path: Path, gps_jpeg: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    one, two = tmp_path / "one.jpg", tmp_path / "two.jpg"
+    shutil.copy(gps_jpeg, one)
+    shutil.copy(camera_jpeg, two)
+    out = tmp_path / "stripped"
+    out.mkdir()
+    assert main([str(one), str(two), "--clean", "--out", str(out)]) == EXIT_OK
+    capsys.readouterr()
+    assert (out / "one.clean.jpg").exists()
+    assert (out / "two.clean.jpg").exists()
+
+
+def test_clean_out_as_one_file_is_refused_for_many_inputs(
+    tmp_path: Path, gps_jpeg: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two inputs and one output name means the second either clobbers the first
+    or dies; neither is something to discover after the fact."""
+    one, two = tmp_path / "one.jpg", tmp_path / "two.jpg"
+    shutil.copy(gps_jpeg, one)
+    shutil.copy(camera_jpeg, two)
+    assert main([str(one), str(two), "--clean", "--out", str(tmp_path / "only.jpg")]) == EXIT_ERROR
+    assert not (tmp_path / "only.jpg").exists()
+
+
+def test_the_restore_marker_is_what_makes_a_restored_file_detectable(
+    tmp_path: Path, gps_jpeg: Path
+) -> None:
+    """Restoring writes a marker, and removing the marker removes the evidence.
+
+    That is a structural limit, not a bug findpic can close: the marker lives in
+    the XMP packet and anyone may delete the packet. What findpic must never do
+    is *print the command that deletes it* — which it did, under
+    privacy.named_people, as `-xmp:all=`. That half is a bug, and
+    test_the_named_people_fix_leaves_the_restore_marker covers it.
+    """
+    from findpic.analysis import AnalysisOptions, analyze
+
+    source = tmp_path / "photo.jpg"
+    shutil.copy(gps_jpeg, source)
+    sidecar = backup(source)
+    stripped = tmp_path / "stripped.jpg"
+    shutil.copy(gps_jpeg, stripped)
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-all=", str(stripped)],
+        check=True,
+        capture_output=True,
+    )
+    written = restore(sidecar, stripped).written
+
+    marked = {f.id for f in analyze(written, options=AnalysisOptions(geocode=False)).findings}
+    assert "recovery.restored" in marked
+    assert "authenticity.xmp_history" in marked
+
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-xmp:all=", str(written)],
+        check=True,
+        capture_output=True,
+    )
+    after = {f.id for f in analyze(written, options=AnalysisOptions(geocode=False)).findings}
+    assert "recovery.restored" not in after
+    assert "authenticity.xmp_history" not in after

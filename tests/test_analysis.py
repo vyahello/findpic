@@ -483,3 +483,186 @@ def test_accuracy_prose_does_not_claim_four_decimals(tmp_path: Path, camera_jpeg
     detail = finding.detail(Translator("en"))
     assert "21.8535" not in detail
     assert "22 metres" in detail
+
+
+# ------------------------------------------------------- the printed commands
+
+
+REMEDIATION_FIXTURES = [
+    "identity_jpeg",
+    "text_jpeg",
+    "ids_jpeg",
+    "gps_jpeg",
+    "named_people_jpeg",
+    "shadowed_jpeg",
+    "gps_png",
+]
+
+
+@pytest.mark.parametrize("fixture", REMEDIATION_FIXTURES)
+def test_remediation_actually_removes_what_the_finding_reported(
+    fixture: str, request: pytest.FixtureRequest, tmp_path: Path
+) -> None:
+    """Run every printed command and check the finding is gone afterwards.
+
+    Nothing had ever executed one. The whole coverage was two substring
+    assertions, which is how four commands shipped deleting a subset of their
+    own rule's tags, one shipped that zsh refuses, and eleven shipped that
+    cannot run on anything but a JPEG.
+    """
+    import shlex
+    import shutil
+    import subprocess
+
+    source = request.getfixturevalue(fixture)
+    path = tmp_path / source.name
+    shutil.copy(source, path)
+
+    before = run(path)
+    removals = [f for f in before.findings if f.remediation and f.remediation_kind == "remove"]
+    assert removals, f"{fixture} produced no removal command to test"
+
+    for finding in removals:
+        argv = shlex.split(finding.remediation)  # asserts it parses as one command
+        assert argv[0] == "exiftool"
+        assert argv[-1] == str(path), "the command must name the real file"
+        assert "-overwrite_original" not in argv
+
+        written = Path(argv[argv.index("-o") + 1])
+        written.unlink(missing_ok=True)
+        result = subprocess.run(argv, capture_output=True, text=True)
+        assert result.returncode == 0, f"{finding.id}: {result.stderr}"
+        assert written.exists(), f"{finding.id} wrote nothing"
+
+        after = finding_ids(run(written))
+        assert finding.id not in after, f"{finding.id} survived its own fix: {finding.remediation}"
+
+
+@pytest.mark.parametrize("fixture", REMEDIATION_FIXTURES)
+def test_the_combined_fix_removes_every_privacy_finding(
+    fixture: str, request: pytest.FixtureRequest, tmp_path: Path
+) -> None:
+    """One command, one output file, every leak that offered a fix.
+
+    Printed separately they could not be run in sequence: each read the original
+    and each wrote `clean_copy.jpg`, so the first succeeded and the rest exited 1
+    with "already exists" — leaving a file the tool said it had cleaned.
+    """
+    import shlex
+    import shutil
+    import subprocess
+
+    from findpic.analysis import fixcmd
+
+    source = request.getfixturevalue(fixture)
+    path = tmp_path / source.name
+    shutil.copy(source, path)
+
+    before = run(path)
+    args = tuple(
+        dict.fromkeys(
+            arg
+            for f in before.findings
+            if f.category is Category.PRIVACY and f.remediation_kind == "remove"
+            for arg in f.remediation_args
+        )
+    )
+    assert args
+    command = fixcmd.command(str(path), before.file.file_type_extension, args)
+    argv = shlex.split(command)
+    result = subprocess.run(argv, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    written = Path(argv[argv.index("-o") + 1])
+    left = {f.id for f in run(written).findings if f.category is Category.PRIVACY and f.remediation}
+    assert not left, f"the combined command left {left}"
+
+
+def test_a_remediation_is_a_parseable_argv(tmp_path: Path, camera_jpeg: Path) -> None:
+    """A filename must never become shell syntax.
+
+    `IMG_20230813_145435"; id #.jpg` made findpic print a line that ran `id`
+    when pasted, and $(…), backticks and $HOME all expanded inside the double
+    quotes it used.
+    """
+    import shlex
+    import shutil
+
+    hostile = tmp_path / 'IMG_20230813_145435"; id #$(whoami)`id`$HOME.jpg'
+    shutil.copy(camera_jpeg, hostile)
+
+    for finding in run(hostile).findings:
+        if not finding.remediation:
+            continue
+        argv = shlex.split(finding.remediation)
+        assert argv[0] == "exiftool"
+        # The path survives as exactly one token, whole and unaltered.
+        assert str(hostile) in argv, finding.remediation
+        assert not any(token in ("id", ";", "&&", "|") for token in argv)
+
+
+def test_no_remediation_contains_an_unquoted_glob(gps_jpeg: Path) -> None:
+    """zsh refuses `-offsettime*=` outright; bash+nullglob deletes the word and
+    copies the file unchanged at exit 0, which is the more dangerous of the two."""
+    import shlex
+
+    for finding in run(gps_jpeg).findings:
+        if not finding.remediation:
+            continue
+        for token in shlex.split(finding.remediation):
+            assert not set(token) & set("*?[~"), f"{finding.id}: {token}"
+
+
+def test_the_named_people_fix_leaves_the_restore_marker(
+    tmp_path: Path, named_people_jpeg: Path
+) -> None:
+    """One command in the tool used to defeat a safeguard another part provides.
+
+    `-xmp:all=` took the whole packet, and findpic's own restore marker lives in
+    it — so a file findpic had restored graded ORIGINAL after running the fix
+    findpic printed for it.
+    """
+    import shlex
+    import shutil
+    import subprocess
+
+    path = tmp_path / "people.jpg"
+    shutil.copy(named_people_jpeg, path)
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-q",
+            "-XMP-xmpMM:HistoryAction=metadata_restored",
+            "-XMP-xmpMM:HistorySoftwareAgent=findpic",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    finding = next(f for f in run(path).findings if f.id == "privacy.named_people")
+    argv = shlex.split(finding.remediation or "")
+    assert subprocess.run(argv, capture_output=True).returncode == 0
+
+    written = Path(argv[argv.index("-o") + 1])
+    after = run(written)
+    assert "privacy.named_people" not in finding_ids(after)
+    assert "authenticity.xmp_history" in finding_ids(after), "the restore marker was destroyed"
+
+
+def test_a_fix_names_the_file_it_is_printed_under(tmp_path: Path, gps_png: Path) -> None:
+    """Every command hard-coded `photo.jpg` in and `clean_copy.jpg` out.
+
+    On a PNG — or a HEIC — that output name is fatal: exiftool refuses with
+    "Can't create JPEG files from other types", exit 1, nothing written.
+    """
+    import shlex
+    import shutil
+
+    path = tmp_path / "shot.png"
+    shutil.copy(gps_png, path)
+    finding = next(f for f in run(path).findings if f.id == "privacy.gps_location")
+    argv = shlex.split(finding.remediation or "")
+    assert argv[-1] == str(path)
+    assert argv[argv.index("-o") + 1].endswith(".png")
+    assert "photo.jpg" not in (finding.remediation or "")

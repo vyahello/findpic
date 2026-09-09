@@ -81,6 +81,20 @@ class Finding:
     weight: float = 0.0
     #: Shell commands are never translated — they must run as written.
     remediation: str | None = None
+    #: The exiftool flags inside :attr:`remediation`, on their own, so the
+    #: renderer can union them into one command. Printed separately, the fixes
+    #: could not be run in sequence: each read the original and each wrote the
+    #: same output name, so the second refused to start and the reader was left
+    #: holding a file the tool said it had cleaned.
+    remediation_args: tuple[str, ...] = ()
+    #: What the command does. Three of them do not remove anything — one writes
+    #: a date back in and one extracts a preview — and all three were printed
+    #: under a label reading "fix:", which in Ukrainian is literally "how to
+    #: remove".
+    remediation_kind: str = "remove"
+    #: Names a catalogue entry describing what else this command takes with it,
+    #: for the one fix whose only available form is broader than its finding.
+    remediation_cost_key: str | None = None
 
     @property
     def title_key(self) -> str:
@@ -180,6 +194,9 @@ class Finding:
             "evidence": self.evidence,
             "weight": self.weight,
             "remediation": self.remediation,
+            "remediation_args": list(self.remediation_args),
+            "remediation_kind": self.remediation_kind,
+            "remediation_cost": self.remediation_cost_key,
         }
 
 

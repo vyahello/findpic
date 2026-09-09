@@ -1,9 +1,17 @@
 """Rules that answer "what does this file give away about me?".
 
-Each finding carries a remediation string: the exact exiftool command that
-removes that specific leak. Every one of them writes to a copy — findpic never
-suggests a command that destroys the user's original. Commands are not
-translated; they have to run exactly as printed.
+Each finding carries a remediation: the exact exiftool command that removes that
+specific leak. Every one writes to a copy — findpic never suggests a command
+that destroys the user's original. Commands are not translated; they have to run
+exactly as printed, which is a claim the fixes here did not previously earn.
+
+Two rules they now keep. **A command names exactly the tags its own finding
+reported** — built by :mod:`.fixcmd` from the same list the rule scanned, so a
+fix cannot delete less than it says (three of them did, and looped forever
+re-offering themselves) or more (one erased findpic's own restore marker and
+flipped a modified file to ORIGINAL). And **a command is an argv, not a
+sentence**: the real path, quoted, with an output name derived from the real
+input, so it runs on a HEIC and on a file whose name contains a quote.
 """
 
 from __future__ import annotations
@@ -13,6 +21,7 @@ from collections.abc import Iterable
 from ..models import Category, Confidence, Finding, Severity
 from ..util import compare_geometry, measured, truncate
 from .context import Context
+from .fixcmd import command, flags_for
 from .registry import rule
 
 #: ``(tag, label key)``. Labels live in the catalogue so they translate.
@@ -75,19 +84,32 @@ PLACE_NAME_TAGS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _fix(context: Context, args: tuple[str, ...], kind: str = "remove") -> dict[str, object]:
+    """The three remediation fields, built from one list of flags."""
+    return {
+        "remediation": command(context.file.path, context.file.file_type_extension, args),
+        "remediation_args": args,
+        "remediation_kind": kind,
+    }
+
+
 def _present(context: Context, tags: tuple[tuple[str, str], ...]) -> list[tuple[str, str, str]]:
     """Return ``(tag, label_key, value)`` for each tag carrying a real value."""
     found: list[tuple[str, str, str]] = []
     seen: set[str] = set()
     for tag, label_key in tags:
-        value = context.meta.str(tag)
-        if not value:
+        # The key the value was actually found under, not the one we asked for:
+        # a request for IPTC:Source is answered out of XMP-dc:Source, and the
+        # report used to name the tag nobody could find in the file.
+        located = context.meta.located(tag)
+        if not located:
             continue
+        actual, value = located
         key = f"{label_key}:{value}"
         if key in seen:
             continue
         seen.add(key)
-        found.append((tag, label_key, value))
+        found.append((actual, label_key, value))
     return found
 
 
@@ -119,7 +141,7 @@ def gps_location(context: Context) -> Iterable[Finding]:
             "place": location.place,
         },
         weight=40,
-        remediation="exiftool -gps:all= -xmp:geotag= -o clean_copy.jpg photo.jpg",
+        **_fix(context, ("-gps:all=", "-xmp:geotag=")),
     )
 
     extras: list[tuple[str, str]] = []
@@ -167,7 +189,7 @@ def place_names(context: Context) -> Iterable[Finding]:
         params={"values": truncate(values, 80)},
         evidence={tag: value for tag, _, value in found},
         weight=15,
-        remediation="exiftool -iptc:all= -xmp-iptcExt:all= -o clean_copy.jpg photo.jpg",
+        **_fix(context, flags_for(tag for tag, _, _ in found)),
     )
 
 
@@ -191,10 +213,7 @@ def identity_tags(context: Context) -> Iterable[Finding]:
         },
         evidence={tag: value for tag, _, value in found},
         weight=20,
-        remediation=(
-            "exiftool -artist= -copyright= -ownername= -xmp:creator= -iptc:all= "
-            "-o clean_copy.jpg photo.jpg"
-        ),
+        **_fix(context, flags_for(tag for tag, _, _ in found)),
     )
 
 
@@ -214,7 +233,10 @@ def named_people(context: Context) -> Iterable[Finding]:
         params={"names": ", ".join(truncate(name, 40) or "" for name in named[:5])},
         evidence={"names": named},
         weight=30,
-        remediation="exiftool -xmp:all= -o clean_copy.jpg photo.jpg",
+        **_fix(
+            context,
+            ("-xmp-mwg-rs:all=", "-xmp-MP:all=", "-xmp-iptcExt:PersonInImage="),
+        ),
     )
 
 
@@ -232,7 +254,7 @@ def face_regions(context: Context) -> Iterable[Finding]:
         count=len(anonymous),
         evidence={"regions": [{"x": p.x, "y": p.y, "w": p.w, "h": p.h} for p in anonymous]},
         weight=10,
-        remediation="exiftool -xmp-mwg-rs:all= -o clean_copy.jpg photo.jpg",
+        **_fix(context, ("-xmp-mwg-rs:all=",)),
     )
 
 
@@ -253,10 +275,7 @@ def device_identifiers(context: Context) -> Iterable[Finding]:
         params={"tag_keys": label_keys[:4]},
         evidence={tag: value for tag, _, value in found},
         weight=15 if hard_serial else 8,
-        remediation=(
-            "exiftool -serialnumber= -lensserialnumber= -imageuniqueid= "
-            "-makernotes:all= -o clean_copy.jpg photo.jpg"
-        ),
+        **_fix(context, flags_for(tag for tag, _, _ in found)),
     )
 
 
@@ -275,9 +294,7 @@ def free_text(context: Context) -> Iterable[Finding]:
         params={"tag_pairs": [(key, truncate(value, 60)) for _, key, value in found[:4]]},
         evidence={tag: value for tag, _, value in found},
         weight=8,
-        remediation=(
-            "exiftool -usercomment= -imagedescription= -comment= -o clean_copy.jpg photo.jpg"
-        ),
+        **_fix(context, flags_for(tag for tag, _, _ in found)),
     )
 
 
@@ -302,9 +319,7 @@ def keywords(context: Context) -> Iterable[Finding]:
         params={"values": truncate(", ".join(values), 70)},
         evidence={"keywords": values},
         weight=8,
-        remediation=(
-            "exiftool -keywords= -subject= -hierarchicalsubject= -o clean_copy.jpg photo.jpg"
-        ),
+        **_fix(context, ("-keywords=", "-subject=", "-hierarchicalsubject=")),
     )
 
 
@@ -322,7 +337,10 @@ def timezone_leak(context: Context) -> Iterable[Finding]:
         params={"offset": offset},
         evidence={"OffsetTimeOriginal": offset},
         weight=5,
-        remediation="exiftool -offsettime*= -o clean_copy.jpg photo.jpg",
+        **_fix(
+            context,
+            ("-OffsetTime=", "-OffsetTimeOriginal=", "-OffsetTimeDigitized="),
+        ),
     )
 
 
@@ -340,7 +358,8 @@ def device_uptime(context: Context) -> Iterable[Finding]:
         params={"uptime_seconds": uptime},
         evidence={"RunTimeSecondsSincePowerUp": round(uptime, 3)},
         weight=3,
-        remediation="exiftool -makernotes:all= -o clean_copy.jpg photo.jpg",
+        **_fix(context, ("-makernotes:all=",)),
+        remediation_cost_key="makernotes",
     )
 
 
@@ -378,7 +397,7 @@ def embedded_thumbnail(context: Context) -> Iterable[Finding]:
                 "ActualSize": real_size,
             },
             weight=18 if cropped else 6,
-            remediation="exiftool -thumbnailimage= -o clean_copy.jpg photo.jpg",
+            **_fix(context, ("-thumbnailimage=",)),
         )
         return
 

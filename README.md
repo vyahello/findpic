@@ -85,20 +85,18 @@ $ findpic demo.jpg
     Anyone who receives this file can read the coordinates 48.858370, 2.294481 straight
     out of it. The camera rated the fix accurate to about 6 metres. If this is your home,
     your workplace, or anywhere you go regularly, that is now known to every recipient.
-    fix: exiftool -gps:all= -xmp:geotag= -o clean_copy.jpg photo.jpg
+    fix: exiftool -gps:all= -xmp:geotag= -o photo.clean.jpg photo.jpg
 
   ! 2 identifiers that tie this photo to one specific device
     Values like Camera body serial number, Per-image unique ID are stable across photos.
     Anyone holding two of your pictures can prove they came from the same camera, even if
     nothing else matches.
-    fix: exiftool -serialnumber= -lensserialnumber= -imageuniqueid= -makernotes:all= -o
-    clean_copy.jpg photo.jpg
+    fix: exiftool -SerialNumber= -ImageUniqueID= -o photo.clean.jpg photo.jpg
 
   ! The file names a person: Artist: Demo Owner, Camera owner: Demo Owner
     These fields are usually filled in once, in a camera's setup menu or an editor's
     preferences, and then quietly attach to every photo afterwards.
-    fix: exiftool -artist= -copyright= -ownername= -xmp:creator= -iptc:all= -o
-    clean_copy.jpg photo.jpg
+    fix: exiftool -Artist= -OwnerName= -o photo.clean.jpg photo.jpg
 
   - The location record also includes altitude 38 m, camera bearing 291°
     Beyond the coordinates, the file records which way you were facing and how high you
@@ -108,7 +106,13 @@ $ findpic demo.jpg
   i The time zone you were in is recorded (UTC+02:00)
     Even with coordinates removed, the offset narrows you to a band of the world, and
     across several photos it maps out your travel.
-    fix: exiftool -offsettime*= -o clean_copy.jpg photo.jpg
+    fix: exiftool -OffsetTime= -OffsetTimeOriginal= -OffsetTimeDigitized= -o
+    photo.clean.jpg photo.jpg
+
+    remove all of the above: exiftool -gps:all= -xmp:geotag= -SerialNumber=
+    -ImageUniqueID= -Artist= -OwnerName= -OffsetTime= -OffsetTimeOriginal=
+    -OffsetTimeDigitized= -o photo.clean.jpg photo.jpg
+    Keep a copy of what you are about to delete: findpic photo.jpg --backup
 
  FILE
  SHA-256        e43e23e337a2194e8b0e217f9a497d3aa97b7ce0a4d41352ca56e59c97bcebda
@@ -116,7 +120,11 @@ $ findpic demo.jpg
  MIME           image/jpeg
 ```
 
-Every finding is a sentence, not a tag dump — and every privacy finding ends with the exact command that removes that leak.
+Every finding is a sentence, not a tag dump — and every privacy finding ends with the exact
+command that removes that leak: the real filename, shell-quoted, with an output name taken from
+the input, naming exactly the tags the finding above it just reported. The block closes with a
+single line that does all of them at once, because the individual ones write to the same output
+and cannot be run in sequence.
 
 ### Українською
 
@@ -188,7 +196,7 @@ $ findpic demo.jpg --lang uk
     Координати 48.858370, 2.294481 прочитає з цього файлу будь-хто, кому ви його
     надішлете. Камера оцінила похибку приблизно в 6 м. Якщо це ваш дім, робота чи місце,
     де ви буваєте регулярно, — ви віддаєте цю адресу разом зі знімком.
-    як прибрати: exiftool -gps:all= -xmp:geotag= -o clean_copy.jpg photo.jpg
+    як прибрати: exiftool -gps:all= -xmp:geotag= -o photo.clean.jpg photo.jpg
 ```
 
 Ukrainian plurals decline properly — `1 обличчя`, `2 обличчя`, `5 облич` — because a tool that gets that wrong reads as machine-translated.
@@ -502,7 +510,8 @@ Where a timestamp genuinely does survive, findpic says so and hands you the comm
   - The capture time survives in the filename: 2023:08:13 14:54:35
     ...that came from the same clock as the deleted tag. This is the one piece of what
     was removed that you can genuinely put back.
-    fix: exiftool -AllDates="2023:08:13 14:54:35" -o restored.jpg "IMG_20230813_145435.jpg"
+    put it back: exiftool '-AllDates=2023:08:13 14:54:35' -o
+    IMG_20230813_145435.dated.jpg IMG_20230813_145435.jpg
 ```
 
 `IMG-20230813-WA0002.jpg` gets a date and an explicit "the hour is not known" — the trailing digits are a counter. `IMG_2781.JPG` gets nothing at all, because Apple has never put a date in a filename and a confident guess there would be pure invention.
@@ -516,6 +525,22 @@ findpic photo.jpg --backup                    # writes photo.jpg.mie beside it
 findpic stripped.jpg --restore photo.jpg.mie  # writes stripped.restored.jpg
 findpic stripped.jpg --restore original.jpg   # any donor that still has its tags
 ```
+
+### Strip it in one go
+
+`--clean` writes a metadata-free copy beside the original, keeping the container:
+
+```bash
+findpic photo.heic --clean                    # writes photo.clean.heic
+findpic album/ --recursive --clean --out out/ # each keeps its own name
+```
+
+Orientation and the ICC profile are put back afterwards — they decide which way up the picture
+goes and what its colours mean, and neither identifies anybody. The original is opened read-only
+and is never an output path, an existing target is refused rather than replaced, and the result
+is read back before you are told it worked: exiftool cannot delete IFD0 from a TIFF, so on a
+`.tif` or a raw file it exits 0 having left the camera's name in place, and `--clean` reports
+that as a failure instead of repeating the claim.
 
 Measured on a real iPhone photo: 20 KB of sidecar restores **165 tags of 166**, every value byte-identical, binary MakerNotes included. The one casualty is Apple's `AROT` HDR block, an APP10 segment exiftool can read and cannot write.
 
@@ -639,7 +664,7 @@ def my_check(context: Context) -> Iterable[Finding]:
         confidence=Confidence.HIGH,
         params={"value": context.meta.str("Some:Tag")},
         weight=15,
-        remediation="exiftool -some:tag= -o clean_copy.jpg photo.jpg",
+        **_fix(context, ("-Some:Tag=",)),
     )
 ```
 

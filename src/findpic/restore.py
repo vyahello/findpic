@@ -147,6 +147,83 @@ def backup(
     return target
 
 
+#: Strip everything, then put back the two things that are not metadata in any
+#: sense a reader cares about: which way up the picture goes, and what its
+#: colours mean. Shared with the bot, which has been doing exactly this since
+#: before the CLI could.
+CLEAN_ARGS = ("-all=", "-tagsfromfile", "@", "-Orientation", "-ICC_Profile")
+
+#: Tags that must not survive a clean, checked afterwards rather than trusted.
+#:
+#: exiftool cannot delete IFD0 from a TIFF — and findpic accepts .tif and the
+#: whole TIFF-based raw family — so on those it prints "[minor] Can't delete
+#: IFD0", exits 0, and leaves Make, Model and Artist exactly where they were.
+#: A write operation that reports success while the camera's name is still in
+#: the file is the one outcome this module exists to prevent.
+SURVIVOR_PROBES = (
+    "IFD0:Make",
+    "IFD0:Model",
+    "IFD0:Artist",
+    "ExifIFD:DateTimeOriginal",
+    "GPS:GPSLatitude",
+)
+
+
+@dataclass(frozen=True)
+class CleanResult:
+    """What a clean actually achieved."""
+
+    source: Path
+    written: Path
+    tags_before: int
+    tags_after: int
+
+    @property
+    def removed(self) -> int:
+        return max(0, self.tags_before - self.tags_after)
+
+
+def clean(
+    source: str | os.PathLike[str],
+    destination: Path | None = None,
+    *,
+    exiftool: ExifTool | None = None,
+) -> CleanResult:
+    """Write a metadata-free copy beside the original, leaving it untouched.
+
+    ``photo.heic`` becomes ``photo.clean.heic``. The suffix is copied from the
+    input because exiftool refuses to change a file's type on the way out, and
+    because a HEIC that comes back as a JPEG is not the same picture.
+
+    Never ``-overwrite_original``: the input is opened read-only and is never an
+    output path, and an existing target is refused rather than replaced.
+    """
+    tool = exiftool or ExifTool()
+    origin = tool._checked_path(source)  # noqa: SLF001 - same package, same checks
+    target = destination or origin.with_name(f"{origin.stem}.clean{origin.suffix}")
+    if target == origin:
+        raise RestoreError("the clean copy would overwrite the original")
+    _refuse_to_clobber(target)
+
+    before = tool.read(origin).tag_count
+    _run(tool, [tool.binary, *CLEAN_ARGS, "-o", str(target), str(origin)])
+    if not target.exists():
+        raise RestoreError("exiftool reported success but wrote no file")
+
+    written = tool.read(target)
+    survivors = [tag for tag in SURVIVOR_PROBES if written.str(tag)]
+    if survivors:
+        # Reported, not swallowed. The caller must not tell anyone this file is
+        # clean when the camera's name is still in it.
+        raise RestoreError(
+            f"{target.name} was written but {', '.join(survivors)} survived — "
+            f"exiftool cannot strip this container ({origin.suffix or 'no suffix'})"
+        )
+    return CleanResult(
+        source=origin, written=target, tags_before=before, tags_after=written.tag_count
+    )
+
+
 def _same_frame(donor: Path, target: Path) -> bool | None:
     """Whether two files hold pictures of the same pixel dimensions.
 
