@@ -696,3 +696,73 @@ def test_a_file_of_thousands_of_tags_is_not_structurally_clean(tmp_path: Path, m
 
 def test_an_ordinary_photograph_does_not_trip_the_tag_ceiling(camera_jpeg: Path) -> None:
     assert "structural.excessive_tags" not in finding_ids(run(camera_jpeg))
+
+
+def test_an_xmp_creator_name_is_reported(tmp_path: Path, camera_jpeg: Path) -> None:
+    """The rule scanned XMP-dc:Creator and could never fire on it."""
+    target = _tagged(camera_jpeg, tmp_path / "creator.jpg", "-XMP-dc:Creator=Jane Q.")
+    finding = next(f for f in run(target).findings if f.id == "privacy.identity_tags")
+    assert finding.evidence == {"XMP-dc:Creator": "Jane Q."}
+
+
+def test_a_windows_tagged_person_is_reported(tmp_path: Path, camera_jpeg: Path) -> None:
+    """Microsoft's People tags were extracted by nobody, so privacy.named_people
+    never fired on a photograph tagged by Windows Photo Gallery."""
+    target = _tagged(
+        camera_jpeg,
+        tmp_path / "mp.jpg",
+        "-XMP-MP:RegionPersonDisplayName=Alice Example",
+        "-XMP-MP:RegionRectangle=0.1, 0.1, 0.2, 0.2",
+    )
+    report = run(target)
+    assert "privacy.named_people" in finding_ids(report)
+    assert [person.name for person in report.people] == ["Alice Example"]
+
+
+def test_a_blank_person_name_is_not_a_person(tmp_path: Path, camera_jpeg: Path) -> None:
+    """meta.get returns the raw value, so a tag holding only spaces arrived
+    truthy and produced a CRITICAL "People are named in the metadata:" with
+    nothing after the colon — and flipped the privacy verdict."""
+    target = _tagged(camera_jpeg, tmp_path / "blank.jpg", "-XMP-MP:RegionPersonDisplayName=   ")
+    report = run(target)
+    assert report.people == []
+    assert "privacy.named_people" not in finding_ids(report)
+
+
+def test_a_person_list_is_not_bound_to_face_boxes_by_position(
+    tmp_path: Path, camera_jpeg: Path
+) -> None:
+    """Microsoft's People list and the MWG region list are independent — MP keeps
+    its own RegionRectangle — so an index in one says nothing about the other.
+
+    Binding them lost any name whose slot was already taken, printed the
+    surviving one twice, and turned an anonymous face into a named one.
+    """
+    target = _tagged(
+        camera_jpeg,
+        tmp_path / "mixed.jpg",
+        "-XMP-mwg-rs:RegionInfo={RegionList=[{Area={X=0.25,Y=0.30,W=0.10,H=0.12,"
+        "Unit=normalized},Type=Face,Name=Jane Doe}]}",
+        "-XMP-MP:RegionPersonDisplayName=John Smith",
+        "-XMP-MP:RegionPersonDisplayName=Jane Doe",
+    )
+    names = [person.name for person in run(target).people if person.name]
+    assert names.count("Jane Doe") == 1, "the same name must not be reported twice"
+    assert "John Smith" in names, "a name in the file must not be dropped"
+
+
+def test_an_anonymous_face_stays_anonymous(tmp_path: Path, camera_jpeg: Path) -> None:
+    """A name bound to an unrelated box also reduced the count of unnamed faces
+    reported beneath it."""
+    target = _tagged(
+        camera_jpeg,
+        tmp_path / "anon.jpg",
+        "-XMP-mwg-rs:RegionInfo={RegionList=[{Area={X=0.25,Y=0.30,W=0.10,H=0.12,"
+        "Unit=normalized},Type=Face},{Area={X=0.70,Y=0.40,W=0.08,H=0.10,"
+        "Unit=normalized},Type=Face}]}",
+        "-XMP-MP:RegionPersonDisplayName=Ann A",
+    )
+    report = run(target)
+    anonymous = [person for person in report.people if not person.name]
+    assert len(anonymous) == 2, "both boxes are unnamed in the file"
+    assert "privacy.face_regions" in finding_ids(report)

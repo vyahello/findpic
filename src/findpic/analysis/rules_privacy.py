@@ -28,8 +28,10 @@ from .registry import rule
 IDENTITY_TAGS: tuple[tuple[str, str], ...] = (
     ("IFD0:Artist", "artist"),
     ("IFD0:Copyright", "copyright"),
+    # Not "ExifIFD:CameraOwnerName": EXIF 0xa430 is only ever named OwnerName,
+    # and XMP-exifEX maps its CameraOwnerName alias onto that same name, so the
+    # entry matched nothing exiftool can emit.
     ("ExifIFD:OwnerName", "camera_owner"),
-    ("ExifIFD:CameraOwnerName", "camera_owner"),
     ("XMP-dc:Creator", "creator"),
     ("XMP-dc:Rights", "rights"),
     ("IPTC:By-line", "iptc_byline"),
@@ -46,7 +48,10 @@ IDENTITY_TAGS: tuple[tuple[str, str], ...] = (
 #: Identifiers that link several photos back to one physical device.
 DEVICE_ID_TAGS: tuple[tuple[str, str], ...] = (
     ("ExifIFD:SerialNumber", "body_serial"),
-    ("ExifIFD:BodySerialNumber", "body_serial"),
+    # Groupless, not "ExifIFD:BodySerialNumber": EXIF 0xa431 is named
+    # SerialNumber, so that entry never matched an EXIF block — but Ricoh's
+    # makernotes do define BodySerialNumber, and the bare name reaches it.
+    ("BodySerialNumber", "body_serial"),
     ("ExifIFD:LensSerialNumber", "lens_serial"),
     ("ExifIFD:ImageUniqueID", "image_unique_id"),
     ("Apple:ContentIdentifier", "apple_content_id"),

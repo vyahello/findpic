@@ -395,21 +395,33 @@ def extract_people(meta: Metadata) -> list[PersonRegion]:
         for _ in range(count):
             people.append(PersonRegion(kind=meta.str("RegionType") or "Face"))
 
-    names = meta.get("XMP-MP:RegionPersonDisplayName", "RegionPersonDisplayName")
-    if names:
-        listed = names if isinstance(names, list) else [names]
-        for index, name in enumerate(str(n) for n in listed if n):
-            if index < len(people) and not people[index].name:
-                people[index].name = name
-            elif index >= len(people):
-                people.append(PersonRegion(kind="Person", name=name))
-
-    listed_people = meta.get("XMP-iptcExt:PersonInImage", "PersonInImage")
-    if listed_people:
-        entries = listed_people if isinstance(listed_people, list) else [listed_people]
-        known = {p.name for p in people if p.name}
-        for name in (str(n) for n in entries if n):
-            if name not in known:
+    # Microsoft's People tags and IPTC's PersonInImage are both flat lists of
+    # names, each independent of the MWG region list above.
+    #
+    # These used to bind an MP name to an MWG region by array *index*. That was
+    # unreachable code — the tag was never read at all until get() learned to
+    # look in the numeric pass — and the moment it came alive it was wrong: the
+    # two vendors keep separate region lists (MP has its own RegionRectangle,
+    # which nothing here reads), so position in one says nothing about position
+    # in the other. It claimed a name belonged to a face box the file never
+    # associated with it, dropped any name whose slot was already taken, and
+    # turned an anonymous region into a named one — which quietly reduced the
+    # count of unnamed faces reported beneath it.
+    for tag, bare in (
+        ("XMP-MP:RegionPersonDisplayName", "RegionPersonDisplayName"),
+        ("XMP-iptcExt:PersonInImage", "PersonInImage"),
+    ):
+        listed = meta.get(tag, bare)
+        if not listed:
+            continue
+        entries = listed if isinstance(listed, (list, tuple)) else [listed]
+        for value in entries:
+            # Stripped: meta.get returns the raw value, so a tag holding only
+            # spaces arrived truthy and produced a CRITICAL "People are named in
+            # the metadata:" with nothing after the colon.
+            name = str(value).strip()
+            known = {person.name for person in people if person.name}
+            if name and name not in known:
                 people.append(PersonRegion(kind="Person", name=name))
 
     return people

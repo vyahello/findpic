@@ -701,10 +701,16 @@ def render_people(console: Console, report: Report) -> None:
         return
     t = report.translator
     table = _kv_table()
+    # Regions, not people: a name from Microsoft's People list or from
+    # PersonInImage is not a region and has no box, so counting it here said
+    # "200 face regions recorded by the camera or a photo app" about a file
+    # carrying two hundred names and no region at all. The names have their own
+    # row below.
+    regions = [person for person in report.people if person.x is not None]
     _add(
         table,
         t.get("ui.label.regions"),
-        t.get("ui.value.regions", len(report.people)),
+        t.get("ui.value.regions", len(regions)) if regions else None,
         "yellow",
     )
     # Where in the picture. Extracted, carried in --json twice, and shown by

@@ -61,6 +61,23 @@ class UnreadableFile(ExifToolError):
     """The path is missing, is not a regular file, or exceeds the size ceiling."""
 
 
+def _as_text(value: Any) -> str | None:
+    """One tag value as displayable text, or None if it is not displayable.
+
+    A structure is not: rendering one would print a raw Python dict at the
+    reader. A *list* of scalars is — it is how exiftool returns an rdf:Seq, and
+    joining it is what the reader wants to see.
+    """
+    if value is None or isinstance(value, dict):
+        return None
+    if isinstance(value, (list, tuple)):
+        parts = [_as_text(item) for item in value]
+        joined = ", ".join(part for part in parts if part)
+        return joined or None
+    text = value.strip() if isinstance(value, str) else str(value)
+    return text or None
+
+
 def _is_binary_placeholder(value: Any) -> bool:
     return isinstance(value, str) and value.startswith(BINARY_MARKER)
 
@@ -150,15 +167,24 @@ class Metadata:
         return candidates[0] if candidates else None
 
     def get(self, *names: str, default: Any = None) -> Any:
-        """First present, non-empty human-readable value among ``names``."""
+        """First present, non-empty value among ``names``, human pass first.
+
+        The numeric pass is a fallback rather than an alternative: where both
+        hold the tag, the human one wins and nothing changes. Where only ``-n``
+        has it, this used to return None even though ``_resolve`` had just found
+        the key — the index is built from both passes and the read was from one.
+        Microsoft's People tags are the case that matters: ``-struct`` collapses
+        them into ``XMP-MP:RegionInfoMP`` and the flat
+        ``RegionPersonDisplayName`` exists only in the numeric pass, so a photo
+        tagged by Windows Photo Gallery reported no named people at all.
+        """
         for name in names:
             key = self._resolve(name)
             if key is None:
                 continue
-            value = self.human.get(key)
-            if value is None or value == "":
-                continue
-            return value
+            for value in (self.human.get(key), self.numeric.get(key)):
+                if value is not None and value != "":
+                    return value
         return default
 
     def num(self, *names: str, default: Any = None) -> Any:
@@ -212,12 +238,23 @@ class Metadata:
         """
         for name in names:
             for key in self._candidates(name):
-                value = self.human.get(key, self.numeric.get(key))
-                if value is None or isinstance(value, (dict, list)):
+                human = self.human.get(key)
+                if isinstance(human, dict):
+                    # A structure, and the -n pass holds the same structure
+                    # flattened to a string — "{_0=1,_1=0,_2=0,_3=0}" for
+                    # Apple:SemanticStyle. Consulting it would print exactly the
+                    # raw structure this method exists to keep off the screen.
                     continue
-                text = value.strip() if isinstance(value, str) else str(value)
-                if text:
-                    return key, text
+                # Otherwise both passes, for the same key. The human pass runs
+                # with -struct, which returns an rdf:Seq as a list — so
+                # XMP-dc:Creator, the single most commonly written identity tag,
+                # came back as ['Jane'] and was skipped, while the -n pass held
+                # the scalar right beside it. The rule scanned the tag and could
+                # never report it.
+                for value in (human, self.numeric.get(key)):
+                    text = _as_text(value)
+                    if text:
+                        return key, text
         return None
 
     def _candidates(self, name: str) -> list[str]:

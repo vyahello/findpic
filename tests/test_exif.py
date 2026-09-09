@@ -279,3 +279,96 @@ def test_a_closed_persistent_process_falls_back(camera_jpeg: Path) -> None:
     tool = ExifTool(persistent=True)
     tool.close()
     assert tool.read(camera_jpeg).tag_count > 0
+
+
+# ------------------------------------------------- what the accessors can see
+
+
+def test_a_seq_valued_tag_is_readable(tmp_path: Path, camera_jpeg: Path) -> None:
+    """XMP-dc:Creator is the most commonly written identity tag of all, and
+    findpic could never report it.
+
+    The human pass runs with -struct, which returns an rdf:Seq as a list, and
+    str() skipped anything that was not a scalar — while the -n pass held the
+    scalar right beside it, under the same key.
+    """
+    import shutil
+    import subprocess
+
+    target = tmp_path / "seq.jpg"
+    shutil.copy(camera_jpeg, target)
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-q",
+            "-XMP-dc:Creator=Jane Q. Photographer",
+            str(target),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    meta = ExifTool().read(target)
+    assert isinstance(meta.human["XMP-dc:Creator"], list), "the fixture must exercise a Seq"
+    assert meta.str("XMP-dc:Creator") == "Jane Q. Photographer"
+
+
+def test_several_values_in_one_tag_are_all_reported(tmp_path: Path, camera_jpeg: Path) -> None:
+    import shutil
+    import subprocess
+
+    target = tmp_path / "many.jpg"
+    shutil.copy(camera_jpeg, target)
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-q",
+            "-XMP-dc:Creator=First",
+            "-XMP-dc:Creator+=Second",
+            str(target),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    assert ExifTool().read(target).str("XMP-dc:Creator") == "First, Second"
+
+
+def test_a_structure_is_never_rendered_as_text(real_samples: list[Path]) -> None:
+    """A dict was skipped and the -n pass holds the same structure flattened to
+    a string — "{_0=1,_1=0,_2=0,_3=0}" — so consulting it would print exactly
+    the raw structure str() exists to keep off the screen.
+    """
+    tool = ExifTool()
+    for path in real_samples:
+        meta = tool.read(path)
+        for key, value in meta.human.items():
+            if isinstance(value, dict):
+                assert meta.str(key) is None, f"{path.name}: {key}"
+
+
+def test_a_tag_only_the_numeric_pass_has_is_still_found(tmp_path: Path, camera_jpeg: Path) -> None:
+    """get() resolved the key against an index built from both passes and then
+    read the human one only. Microsoft's People tags live solely in -n, so a
+    photograph tagged by Windows Photo Gallery reported no named people at all.
+    """
+    import shutil
+    import subprocess
+
+    target = tmp_path / "people.jpg"
+    shutil.copy(camera_jpeg, target)
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-q",
+            "-XMP-MP:RegionPersonDisplayName=Alice Example",
+            "-XMP-MP:RegionRectangle=0.1, 0.1, 0.2, 0.2",
+            str(target),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    meta = ExifTool().read(target)
+    assert "XMP-MP:RegionPersonDisplayName" not in meta.human, "fixture must be numeric-only"
+    assert meta.get("XMP-MP:RegionPersonDisplayName") == "Alice Example"

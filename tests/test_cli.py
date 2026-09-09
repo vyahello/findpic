@@ -1094,3 +1094,31 @@ def test_version_names_the_exiftool_build(capsys: pytest.CaptureFixture[str]) ->
     with pytest.raises(SystemExit):
         main(["--version"])
     assert "exiftool" in capsys.readouterr().out
+
+
+def test_a_name_is_not_counted_as_a_face_region(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file carrying two hundred names and no region at all reported "200 face
+    regions recorded by the camera or a photo app"."""
+    import shutil
+    import subprocess
+
+    target = tmp_path / "names.jpg"
+    shutil.copy(camera_jpeg, target)
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-q",
+            "-XMP-MP:RegionPersonDisplayName=Ann A",
+            "-XMP-MP:RegionPersonDisplayName+=Bob B",
+            str(target),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    main([str(target), *OFFLINE])
+    out = capsys.readouterr().out
+    assert "Ann A, Bob B" in " ".join(out.split())
+    assert "face region" not in out, "there is no region in this file"
