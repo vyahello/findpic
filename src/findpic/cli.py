@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 
 from rich.cells import cell_len, set_cell_size
@@ -55,12 +56,24 @@ IMAGE_SUFFIXES = {
     ".srw",
     ".mp4",
     ".mov",
+    # What Chrome and Outlook save a JPEG as, and the video containers a phone
+    # produces. A directory scan silently ignored them while naming one directly
+    # analysed it fine.
+    ".jfif",
+    ".jfi",
+    ".m4v",
+    ".3gp",
+    ".avi",
+    ".mkv",
 }
 
 #: Shell exit codes, so findpic composes with scripts and CI.
 EXIT_OK = 0
 EXIT_FINDINGS = 1
 EXIT_ERROR = 2
+
+#: The shell's own convention for a process ended by SIGINT.
+EXIT_INTERRUPTED = 130
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -93,6 +106,11 @@ def build_parser() -> argparse.ArgumentParser:
     output = parser.add_argument_group("output")
     output.add_argument("--json", action="store_true", help="emit JSON instead of a report")
     output.add_argument("--raw", action="store_true", help="with --json, include every raw tag")
+    output.add_argument(
+        "--ndjson",
+        action="store_true",
+        help="one compact JSON object per line, written as each file finishes",
+    )
     output.add_argument("--summary", "-s", action="store_true", help="one line per file")
     output.add_argument("--quiet", "-q", action="store_true", help="hide informational findings")
     output.add_argument("--notes", action="store_true", help="show exiftool's own warnings")
@@ -184,16 +202,33 @@ def build_parser() -> argparse.ArgumentParser:
 
 def collect_paths(paths: list[Path], recursive: bool) -> list[Path]:
     """Expand directories into image files, keeping the caller's order."""
-    collected: list[Path] = []
-    for path in paths:
-        if path.is_dir():
-            walker = path.rglob("*") if recursive else path.glob("*")
-            collected.extend(
-                sorted(p for p in walker if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
-            )
-        else:
-            collected.append(path)
+    collected, _ = _collect(paths, recursive)
     return collected
+
+
+def _collect(paths: list[Path], recursive: bool) -> tuple[list[Path], Counter[str]]:
+    """The image files, and a count of the suffixes passed over.
+
+    The second half exists because a directory scan that silently ignores a
+    ``.jfif`` — which is what Chrome and Outlook save — while analysing the same
+    file happily when it is named directly, looks like the file is the problem.
+    """
+    collected: list[Path] = []
+    skipped: Counter[str] = Counter()
+    for path in paths:
+        if not path.is_dir():
+            collected.append(path)
+            continue
+        found = []
+        for candidate in path.rglob("*") if recursive else path.glob("*"):
+            if not candidate.is_file():
+                continue
+            if candidate.suffix.lower() in IMAGE_SUFFIXES:
+                found.append(candidate)
+            elif candidate.suffix:
+                skipped[candidate.suffix.lower()] += 1
+        collected.extend(sorted(found))
+    return collected, skipped
 
 
 def _plain(message: str) -> Text:
@@ -489,10 +524,44 @@ def main(argv: list[str] | None = None) -> int:
         hash_file=not args.no_hash,
     )
 
-    targets = collect_paths(args.paths, args.recursive)
+    targets, skipped = _collect(args.paths, args.recursive)
     if not targets:
-        errors.print(f"[yellow]{translator.get('cli.error.no_images')}[/]")
+        # Pointing findpic at a photo library organised in folders — the normal
+        # shape of one — said "No image files found" and exited 2 with three
+        # hundred images sitting right there. It is the most likely first
+        # command a new user types.
+        for path in args.paths:
+            if not path.is_dir():
+                continue
+            deeper = sum(
+                1 for p in path.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES
+            )
+            if deeper:
+                errors.print(
+                    _plain(
+                        translator.get(
+                            "cli.error.no_images_here", deeper, path=str(path), count=deeper
+                        )
+                    ),
+                    style="yellow",
+                )
+                return EXIT_ERROR
+        errors.print(_plain(translator.get("cli.error.no_images")), style="yellow")
         return EXIT_ERROR
+
+    if skipped:
+        total = sum(skipped.values())
+        errors.print(
+            _plain(
+                translator.get(
+                    "cli.warn.skipped",
+                    total,
+                    count=total,
+                    suffixes=", ".join(sorted(skipped)),
+                )
+            ),
+            style="grey54",
+        )
 
     if args.backup or args.restore or args.clean:
         if args.out and len(targets) > 1 and not args.out.is_dir():
@@ -504,7 +573,9 @@ def main(argv: list[str] | None = None) -> int:
         return run_metadata_write(args, targets, console, errors, exiftool, translator)
 
     reports: list[Report] = []
+    problems: list[dict[str, object]] = []
     failures = 0
+    done = 0
 
     for index, path in enumerate(targets):
         try:
@@ -518,16 +589,45 @@ def main(argv: list[str] | None = None) -> int:
         except ExifToolMissing as exc:
             errors.print(Text(printable(exc), style="bold red"))
             return EXIT_ERROR
+        except KeyboardInterrupt:
+            # A 300-file scan takes the better part of a minute, so this happens
+            # often, and it ended in a raw traceback from wherever the
+            # interpreter happened to be — which reads as a crash. Anything
+            # already geocoded is safe: the cache is written per photograph.
+            geocoder.save_cache()
+            errors.print(
+                _plain(translator.get("cli.interrupted", done=done, total=len(targets))),
+                style="yellow",
+            )
+            return EXIT_INTERRUPTED
         except ExifToolError as exc:
             errors.print(_error_line(path, exc), no_wrap=True, crop=False, overflow="ignore")
+            problems.append({"file": {"path": str(path)}, "error": printable(exc)})
             failures += 1
             continue
         except OSError as exc:
             errors.print(_error_line(path, exc), no_wrap=True, crop=False, overflow="ignore")
+            problems.append({"file": {"path": str(path)}, "error": printable(exc)})
+            failures += 1
+            continue
+        except Exception as exc:  # noqa: BLE001
+            # A directory run is exactly the case where one bad file must not
+            # take the other nine hundred with it. A malformed geocoder payload
+            # replayed out of the cache used to abort the whole run with an
+            # empty stdout.
+            errors.print(_error_line(path, exc), no_wrap=True, crop=False, overflow="ignore")
+            problems.append({"file": {"path": str(path)}, "error": printable(exc)})
             failures += 1
             continue
 
+        done += 1
         reports.append(report)
+        if args.ndjson:
+            # Written as each file finishes rather than buffered: --json has to
+            # close a valid array, this does not, so it is the form that works
+            # on a live stream.
+            print(json.dumps(report.to_dict(include_raw=args.raw), default=str), flush=True)
+            continue
         if args.json or args.summary:
             continue
         if index:
@@ -542,9 +642,17 @@ def main(argv: list[str] | None = None) -> int:
 
     geocoder.save_cache()
 
-    if args.json:
-        payload = [r.to_dict(include_raw=args.raw) for r in reports]
-        print(json.dumps(payload if len(payload) != 1 else payload[0], indent=2, default=str))
+    if args.ndjson:
+        for problem in problems:
+            print(json.dumps(problem, default=str), flush=True)
+    elif args.json:
+        # Always a list. It used to be a bare object when exactly one file
+        # *succeeded*, so `findpic *.jpg --json | jq '.[].file.name'` worked all
+        # week and broke the morning the glob matched one file — and a file that
+        # failed appeared nowhere in the payload, so a consumer could not tell
+        # "no GPS" from "never read".
+        payload = [r.to_dict(include_raw=args.raw) for r in reports] + problems
+        print(json.dumps(payload, indent=2, default=str))
     elif args.summary:
         for report in reports:
             # One file, one line — always. A wrapped summary is unreadable and

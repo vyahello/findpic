@@ -423,6 +423,15 @@
   "cli.description": "Read a photo's metadata and explain what device made it, when and where, whether it is an untouched original, and what it leaks.",
   "cli.error.no_exiftool": "exiftool was not found. Install it with:",
   "cli.error.no_images": "No image files found in the given paths.",
+  "cli.interrupted": "Interrupted — {done} of {total} files done.",
+  "cli.error.no_images_here": {
+    "one": "No image files directly in {path}, but {count} in its subdirectories. Add --recursive to include it.",
+    "other": "No image files directly in {path}, but {count} in its subdirectories. Add --recursive to include them."
+},
+  "cli.warn.skipped": {
+    "one": "{count} file skipped — findpic does not recognise {suffixes}.",
+    "other": "{count} files skipped — findpic does not recognise {suffixes}."
+},
   "cli.legend": "orig/priv/struct  ·  + good  ~ fair  ! poor  x bad  ? unknown",
   "ui.list.separator": ", ",
   "ui.list.pair": "{label}: {value}",

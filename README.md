@@ -585,15 +585,30 @@ findpic *.jpg --summary            # one line per file
 findpic album/ --recursive         # walk a directory
 findpic photo.jpg --json           # machine-readable
 findpic photo.jpg --json --raw     # …including every raw tag
+findpic album/ -r --ndjson         # one object per line, as each file finishes
 findpic photo.jpg --quiet          # hide informational findings
 findpic photo.jpg --no-geocode     # never touch the network
+findpic photo.jpg --clean          # write a metadata-free copy beside it
 ```
 
 Language is taken from `FINDPIC_LANG`, then your locale, then English. `--lang` overrides.
 
-Exit codes, so it composes in scripts: `0` nothing notable · `1` notable findings · `2` error.
+Exit codes, so it composes in scripts: `0` nothing notable · `1` notable findings ·
+`2` error · `130` interrupted.
 
-In `--json`, `id` is stable across languages and `title`/`detail` follow `--lang`, so scripts key on the id and humans read the prose.
+**`--json` is always a list**, one entry per file you asked for, whether that is one file or
+two hundred — so `findpic *.jpg --json | jq '.[].file.name'` does not change behaviour on the
+morning the glob happens to match a single file. A file that could not be read appears in the
+list too, as `{"file": {"path": …}, "error": …}`, so a consumer can tell *no location* apart
+from *never opened*.
+
+Use `--ndjson` for a stream: one compact object per line, flushed as each file finishes, which
+is what you want when the directory is large enough that waiting for a closing `]` is the
+problem.
+
+In `--json`, `id` is stable across languages and `title`/`detail` follow `--lang`, so scripts
+key on the id and humans read the prose. Each verdict carries `reason_ids` alongside `reasons`
+for the same reason: the prose is translated, the ids join back to `findings[].id`.
 
 ## What it looks for
 

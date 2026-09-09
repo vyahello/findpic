@@ -50,7 +50,8 @@ def test_missing_file_exits_two(tmp_path: Path, capsys: pytest.CaptureFixture[st
 
 def test_json_output_is_valid(gps_jpeg: Path, capsys: pytest.CaptureFixture[str]) -> None:
     main([str(gps_jpeg), "--json", *OFFLINE])
-    payload = json.loads(capsys.readouterr().out)
+    # Always a list, one entry per file requested — see test_json_is_always_a_list.
+    payload = json.loads(capsys.readouterr().out)[0]
     assert payload["device"]["model"] == "TestCam 900"
     assert payload["location"]["latitude"] == pytest.approx(48.8584, abs=1e-3)
     assert set(payload["verdicts"]) == {"originality", "privacy", "structure"}
@@ -59,7 +60,8 @@ def test_json_output_is_valid(gps_jpeg: Path, capsys: pytest.CaptureFixture[str]
 
 def test_json_with_raw_includes_tags(gps_jpeg: Path, capsys: pytest.CaptureFixture[str]) -> None:
     main([str(gps_jpeg), "--json", "--raw", *OFFLINE])
-    payload = json.loads(capsys.readouterr().out)
+    # Always a list, one entry per file requested — see test_json_is_always_a_list.
+    payload = json.loads(capsys.readouterr().out)[0]
     assert payload["raw"]
 
 
@@ -107,7 +109,8 @@ def test_no_geocode_makes_no_network_call(
 
     monkeypatch.setattr(urllib.request, "urlopen", explode)
     assert main([str(gps_jpeg), "--json", *OFFLINE]) in (EXIT_OK, EXIT_FINDINGS)
-    payload = json.loads(capsys.readouterr().out)
+    # Always a list, one entry per file requested — see test_json_is_always_a_list.
+    payload = json.loads(capsys.readouterr().out)[0]
     assert payload["location"]["place"] is None
 
 
@@ -779,3 +782,144 @@ def test_the_tag_group_list_is_not_capped(
     main([str(camera_jpeg), "--notes", "--width", "200", *OFFLINE])
     row = next(line for line in capsys.readouterr().out.splitlines() if "Tag groups" in line)
     assert "…" not in row
+
+
+# --------------------------------------------------------- the JSON interface
+
+
+def test_json_is_always_a_list(
+    tmp_path: Path, camera_jpeg: Path, gps_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It was a bare object when exactly one file *succeeded*, so
+    `findpic *.jpg --json | jq '.[].file.name'` worked all week and broke the
+    morning the glob matched one file."""
+    main([str(camera_jpeg), "--json", *OFFLINE])
+    one = json.loads(capsys.readouterr().out)
+    assert isinstance(one, list) and len(one) == 1
+
+    main([str(camera_jpeg), str(gps_jpeg), "--json", *OFFLINE])
+    two = json.loads(capsys.readouterr().out)
+    assert isinstance(two, list) and len(two) == 2
+
+
+def test_a_failed_file_appears_in_the_json(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failure reached stderr only, so a consumer could not tell "no GPS"
+    from "never read"."""
+    import shutil
+
+    good = tmp_path / "good.jpg"
+    shutil.copy(camera_jpeg, good)
+    bad = tmp_path / "bad.jpg"
+    bad.write_bytes(b"")
+
+    assert main([str(good), str(bad), "--json", *OFFLINE]) == EXIT_ERROR
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 2
+    failed = [entry for entry in payload if "error" in entry]
+    assert len(failed) == 1
+    assert failed[0]["file"]["path"] == str(bad)
+
+
+def test_ndjson_emits_one_object_per_line(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import shutil
+
+    for index in range(3):
+        shutil.copy(camera_jpeg, tmp_path / f"{index}.jpg")
+    main([str(tmp_path), "--ndjson", *OFFLINE])
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert len(lines) == 3
+    for line in lines:
+        assert json.loads(line)["file"]["path"]
+
+
+def test_verdict_reason_ids_join_against_finding_ids(
+    gps_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`reasons` is param-interpolated prose that changes with --lang; nothing
+    mapped a verdict back to the findings that produced it."""
+    main([str(gps_jpeg), "--json", "--lang", "uk", *OFFLINE])
+    report = json.loads(capsys.readouterr().out)[0]
+    ids = {finding["id"] for finding in report["findings"]}
+    # A clean axis legitimately cites nothing; what matters is that whatever it
+    # does cite can be joined back to a finding.
+    assert any(v["reason_ids"] for v in report["verdicts"].values())
+    for verdict in report["verdicts"].values():
+        assert set(verdict["reason_ids"]) <= ids, verdict["axis"]
+
+
+# ------------------------------------------------------------ giving up, and
+# ------------------------------------------------------------ finding nothing
+
+
+def test_interrupt_exits_cleanly(
+    tmp_path: Path,
+    camera_jpeg: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A 300-file scan takes the better part of a minute, so this happens often,
+    and it ended in a raw traceback that reads as a crash."""
+    import shutil
+
+    from findpic import cli
+
+    for index in range(3):
+        shutil.copy(camera_jpeg, tmp_path / f"{index}.jpg")
+
+    real = cli.analyze
+    seen = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        seen["n"] += 1
+        if seen["n"] == 2:
+            raise KeyboardInterrupt
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "analyze", flaky)
+    assert main([str(tmp_path), *OFFLINE]) == 130
+    captured = capsys.readouterr()
+    assert "Interrupted" in captured.err
+    assert "1 of 3" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_a_directory_of_subdirectories_suggests_recursive(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A photo library organised in folders — the normal shape of one — said
+    "No image files found" with three hundred images sitting right there."""
+    import shutil
+
+    album = tmp_path / "album"
+    (album / "2023").mkdir(parents=True)
+    shutil.copy(camera_jpeg, album / "2023" / "one.jpg")
+
+    assert main([str(album), *OFFLINE]) == EXIT_ERROR
+    error = capsys.readouterr().err
+    assert "--recursive" in error
+    assert "1" in error
+
+
+def test_an_unrecognised_suffix_is_reported_not_ignored(
+    tmp_path: Path, camera_jpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A .jfif was skipped by a directory scan and analysed fine when named
+    directly, which looks like the file is the problem."""
+    import shutil
+
+    shutil.copy(camera_jpeg, tmp_path / "photo.jpg")
+    (tmp_path / "notes.txt").write_text("x")
+    main([str(tmp_path), *OFFLINE])
+    assert ".txt" in capsys.readouterr().err
+
+
+def test_a_jfif_is_recognised(tmp_path: Path, camera_jpeg: Path) -> None:
+    """It is what Chrome and Outlook save."""
+    import shutil
+
+    shutil.copy(camera_jpeg, tmp_path / "chrome.jfif")
+    assert collect_paths([tmp_path], recursive=False) == [tmp_path / "chrome.jfif"]

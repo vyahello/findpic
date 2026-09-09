@@ -462,6 +462,12 @@ class Verdict:
             "summary": self.summary(translator),
             "score": round(self.score, 1),
             "reasons": self.reason_lines(translator),
+            # The stable half. `reasons` is param-interpolated prose that changes
+            # with --lang, so nothing could join a verdict back to the findings
+            # that produced it — while the join key existed on the other side all
+            # along and was thrown away here. models.py's own contract says `id`
+            # is what a consumer holds on to.
+            "reason_ids": [finding.id for finding in self.reasons],
         }
 
 

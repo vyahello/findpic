@@ -887,7 +887,7 @@ def _cost_line(console: Console, cost: str, t: Translator) -> None:
     body.append(t.get(f"ui.value.fix_cost.{cost}"), style="grey54")
     # Padding on all four sides so a wrapped continuation keeps the indent the
     # rest of the block has, instead of dedenting to column one.
-    console.print(Padding(body, (0, 0, 0, 5)))
+    console.print(Padding(body, (0, 0, 0, 4)))
 
 
 def _print_finding(console: Console, finding: Finding, t: Translator) -> None:
