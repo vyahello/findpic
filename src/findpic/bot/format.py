@@ -41,6 +41,7 @@ from ..interpret import (
 )
 from ..models import Category, Confidence, Finding, Report, Severity, VerdictLevel
 from ..recover import timestamp_from_filename
+from ..tables import COLOR_SPACE_KEYS, FLASH_KEYS
 from ..util import parse_exif_datetime
 
 #: Telegram's hard limit. We aim below it and fold the rest away.
@@ -483,14 +484,21 @@ def render_shot(report: Report) -> list[str]:
         if rendered:
             lines.append(esc(rendered))
 
-    flash = (capture.flash or "").lower()
-    if "did not fire" in flash:
-        lines.append(esc(t.get("detail.flash.off")))
-    elif "fired" in flash:
-        lines.append(esc(t.get("detail.flash.on")))
+    if capture.flash:
+        # The same table the terminal uses. This was a two-branch substring test
+        # that collapsed twenty-seven exiftool strings into two sentences — so a
+        # flash the photographer switched off and one the camera decided not to
+        # use read identically, which is exactly what this row is looked at for
+        # — and printed nothing at all for "No Flash" or "No flash function",
+        # because neither string contains "fired".
+        lines.append(esc(t.get("detail.flash", value=t.value(capture.flash, FLASH_KEYS))))
 
-    if image.icc_profile:
-        lines.append(esc(t.get("detail.colour", value=image.icc_profile)))
+    # The same fallback the terminal has. Without it a file carrying ExifIFD:
+    # ColorSpace and no ICC profile — which is what several real ones do — had a
+    # Colour row in one front end and none in the other.
+    colour = image.icc_profile or t.value(image.color_space, COLOR_SPACE_KEYS)
+    if colour:
+        lines.append(esc(t.get("detail.colour", value=colour)))
     return _block(t.get("bot.section.shot"), lines)
 
 

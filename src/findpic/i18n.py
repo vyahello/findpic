@@ -171,6 +171,22 @@ class Translator:
             # A malformed template must not take down a report; show it raw.
             return str(template)
 
+    def value(self, raw: object, mapping: dict[str, str]) -> object:
+        """Translate one of exiftool's decoded English strings, or leave it be.
+
+        Exact match, never a slug built from the value: an unmapped string would
+        ask for a catalogue key that does not exist, and a missing key falls
+        back to English while failing the catalogue-parity test. Out-of-range
+        tags decode as "Unknown (5)", and the raw string is the honest answer.
+
+        Shared by both front ends so that a fact does not depend on which one
+        printed it — the bot collapsed all twenty-seven Flash strings into two
+        sentences, so a flash the photographer switched off and one the camera
+        decided not to use read identically, while the terminal told them apart.
+        """
+        key = mapping.get(str(raw)) if raw is not None else None
+        return self.get(key) if key else raw
+
     #: Terse alias, because this gets called a lot.
     t = get
 

@@ -1496,3 +1496,89 @@ def test_a_rename_never_loses_the_picture(archive, tmp_path: Path) -> None:
     assert moved is not None
     assert len(list((archive.root / "objects").rglob("*.jpg"))) == 1
     assert archive.resolve(moved) is not None
+
+
+# ------------------------------------------- the two front ends must agree
+
+
+def _bot_text(report) -> str:
+    """The Telegram message as a person reads it, tags stripped."""
+    import html
+    import re
+
+    from findpic.bot import format as bot_format
+
+    rendered = bot_format.render_report(report)
+    if isinstance(rendered, list):
+        rendered = "\n".join(rendered)
+    return html.unescape(re.sub(r"<[^>]+>", "", rendered))
+
+
+@pytest.mark.parametrize("code", [0, 9, 16, 24, 32, 65])
+def test_the_bot_tells_flash_states_apart(tmp_path: Path, camera_jpeg: Path, code: int) -> None:
+    """A fact must not depend on which front end printed it.
+
+    The bot tested `"did not fire" in flash` and `"fired" in flash`, collapsing
+    all twenty-seven of exiftool's Flash strings into two sentences — so a flash
+    the photographer switched off and one the camera decided not to use read
+    identically, which is exactly what this row is looked at for — and printing
+    nothing at all for "No Flash" or "No flash function", neither of which
+    contains "fired".
+    """
+    import shutil
+    import subprocess
+
+    from findpic.analysis import AnalysisOptions, analyze
+    from findpic.tables import FLASH_KEYS
+
+    target = tmp_path / f"flash{code}.jpg"
+    shutil.copy(camera_jpeg, target)
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-n", f"-Flash={code}", str(target)],
+        check=True,
+        capture_output=True,
+    )
+    report = analyze(target, options=AnalysisOptions(geocode=False))
+    assert report.capture.flash, "the fixture must carry a Flash value"
+    expected = str(report.translator.value(report.capture.flash, FLASH_KEYS))
+    assert expected in _bot_text(report)
+
+
+def test_both_front_ends_state_the_same_colour(tmp_path: Path, camera_jpeg: Path) -> None:
+    """The bot had no fallback to ColorSpace, so a file carrying one and no ICC
+    profile — which several real ones do — had a Colour row in one front end and
+    none in the other."""
+    import shutil
+    import subprocess
+
+    from findpic.analysis import AnalysisOptions, analyze
+    from findpic.tables import COLOR_SPACE_KEYS
+
+    target = tmp_path / "colour.jpg"
+    shutil.copy(camera_jpeg, target)
+    subprocess.run(
+        ["exiftool", "-overwrite_original", "-q", "-n", "-ExifIFD:ColorSpace=1", str(target)],
+        check=True,
+        capture_output=True,
+    )
+    report = analyze(target, options=AnalysisOptions(geocode=False))
+    colour = report.image.icc_profile or report.image.color_space
+    assert colour, "the fixture must carry a colour space"
+    assert str(report.translator.value(colour, COLOR_SPACE_KEYS)) in _bot_text(report)
+
+
+@pytest.mark.samples
+def test_neither_front_end_contradicts_the_other(real_samples: list[Path]) -> None:
+    """On the owner's own photographs: whatever both choose to show, they must
+    not disagree about it. A chat message is shorter than a terminal report by
+    design — omission is fine, contradiction is not.
+    """
+    from findpic.analysis import AnalysisOptions, analyze
+
+    for path in real_samples:
+        report = analyze(path, options=AnalysisOptions(geocode=False))
+        message = _bot_text(report)
+        if report.location.present and report.location.decimal:
+            assert report.location.decimal in message, path.name
+        if report.device.make and report.device.label:
+            assert report.device.label in message, path.name

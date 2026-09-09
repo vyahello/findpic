@@ -166,16 +166,9 @@ def _scaled(note: Note | None) -> Note | None:
     return Note(note.key.replace("detail.", "scale.", 1), note.params)
 
 
-def _exiftool_value(value: object, mapping: dict[str, str], t: Translator) -> object:
-    """Translate one of exiftool's decoded English strings, or leave it alone.
-
-    Exact match, never a slug built from the value: an unmapped string would ask
-    for a catalogue key that does not exist, and a missing key silently falls
-    back to English while failing the catalogue-parity test. Out-of-range tags
-    decode as "Unknown (5)", and the raw string is the honest answer for those.
-    """
-    key = mapping.get(str(value)) if value is not None else None
-    return t.get(key) if key else value
+def _translated(value: object, mapping: dict[str, str], t: Translator) -> object:
+    """Shared with the bot through Translator.value, so both say the same thing."""
+    return t.value(value, mapping)
 
 
 def _note_row(
@@ -526,7 +519,7 @@ def render_where(console: Console, report: Report, links: bool = True) -> None:
             describe_movement(location.speed, location.speed_ref),
             t,
             raw=(
-                f"{location.speed:g} {_exiftool_value(location.speed_ref, SPEED_REF_KEYS, t)}"
+                f"{location.speed:g} {_translated(location.speed_ref, SPEED_REF_KEYS, t)}"
                 if location.speed_ref
                 else None
             ),
@@ -569,7 +562,7 @@ def _encoding(report: Report, t: Translator) -> object:
     row silently disappeared. The QuickTime profile is the equivalent fact.
     """
     image = report.image
-    process = _exiftool_value(image.encoding_process, ENCODING_PROCESS_KEYS, t)
+    process = _translated(image.encoding_process, ENCODING_PROCESS_KEYS, t)
     if process is None:
         return report.raw.get("QuickTime:GeneralProfileIDC")
     if not (image.subsampling and image.bits_per_sample and image.color_components):
@@ -603,7 +596,7 @@ def render_image(console: Console, report: Report) -> None:
         _add(
             table,
             t.get("ui.label.orientation"),
-            _exiftool_value(image.orientation, ORIENTATION_KEYS, t),
+            _translated(image.orientation, ORIENTATION_KEYS, t),
         )
     # Directly under Orientation on purpose: that row is the display flag the
     # file carries, this one is how the device was actually being held, and a
@@ -653,22 +646,22 @@ def render_image(console: Console, report: Report) -> None:
         t,
         raw=report.raw.get("Apple:FocusDistanceRange"),
     )
-    _add(table, t.get("ui.label.flash"), _exiftool_value(capture.flash, FLASH_KEYS, t))
+    _add(table, t.get("ui.label.flash"), _translated(capture.flash, FLASH_KEYS, t))
     _add(
         table,
         t.get("ui.label.program"),
-        _exiftool_value(capture.exposure_program, EXPOSURE_PROGRAM_KEYS, t),
+        _translated(capture.exposure_program, EXPOSURE_PROGRAM_KEYS, t),
     )
     _add(
         table,
         t.get("ui.label.colour"),
-        image.icc_profile or _exiftool_value(image.color_space, COLOR_SPACE_KEYS, t),
+        image.icc_profile or _translated(image.color_space, COLOR_SPACE_KEYS, t),
     )
     _add(
         table,
         t.get("ui.label.metering"),
         " · ".join(
-            str(_exiftool_value(value, mapping, t))
+            str(_translated(value, mapping, t))
             for value, mapping in (
                 (capture.metering_mode, METERING_KEYS),
                 (capture.white_balance, WHITE_BALANCE_KEYS),
